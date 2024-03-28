@@ -1,4 +1,6 @@
 """
+**WORK IN PROGRESS**
+
 Example 1.1 Inventory problem
 Algorithms for Reinforcement Learning (Csaba Szepesvari)
 
