@@ -34,13 +34,10 @@ from torch.utils.tensorboard import SummaryWriter
 State = tetris.BaseGame
 ACTIONS = ["left", "right", "hard_drop", "soft_drop", "rotate"]
 Action = Literal["left", "right", "hard_drop", "soft_drop", "rotate"]
-RANDOM_ACTION_EPSILON_INIT = 0.1
-RANDOM_ACTION_EPSILON_DECAY = 1.
-# RANDOM_ACTION_EPSILON_DECAY = 0.999
 RENDER = True
 LOGGER = SummaryWriter(f'runs/{N_QUEUE}')
 SAVE_EVERY = 100
-RENDER_EVERY = 1000
+# RENDER_EVERY = 1
 LR = 0.005
 
 class TetrisNet(torch.nn.Module):
@@ -261,7 +258,7 @@ def immediate_reward(a: Action, g_bef: tetris.BaseGame, g_aft: tetris.BaseGame) 
         reward += 10 * (g_aft.scorer.line_clears - g_bef.scorer.line_clears)
         reward += .5 * (n_hole_bef - n_hole_aft)
         # reward += diff_total_bef - diff_total_aft
-        reward += max_height_bef - 2 * max_height_aft
+        reward += max_height_bef - max_height_aft
         if n_hole_aft - n_hole_bef == 0:
             pass
         elif diff_total_aft - diff_total_bef == 0:
@@ -363,6 +360,8 @@ def main():
             if g.lost:
                 assert should_game_end
                 # immediate reward is zero
+                reward = 0
+                reward_total += reward
                 n_tick += 1
 
                 optim_full.zero_grad()
@@ -432,11 +431,12 @@ def main():
                     should_game_end = False
 
             assert should_game_end == g_aft.lost, f"{should_game_end} != {g_aft.lost}"
-            g = g_aft
             reward = immediate_reward(a, g, g_aft)
+            g = g_aft
             reward_total += reward
             n_tick += 1
             # apply action done
+            *_, n_hole, diff_total, _ = game2feature_heuristic(g)
 
             # g = g_best
             if should_render:
