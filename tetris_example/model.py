@@ -37,7 +37,7 @@ Action = Literal["left", "right", "hard_drop", "soft_drop", "rotate"]
 RENDER = True
 LOGGER = SummaryWriter(f'runs/{N_QUEUE}')
 SAVE_EVERY = 100
-# RENDER_EVERY = 1
+RENDER_EVERY = 1
 LR = 0.005
 
 class TetrisNet(torch.nn.Module):
@@ -67,9 +67,9 @@ class TetrisNet(torch.nn.Module):
 
 
 def get_discount(i: int = 0) -> Iterator[float]:
-    VALUE_START = 0.4
+    VALUE_START = 0.2
     VALUE_END   = 0.95
-    ITER_MAX = 100000
+    ITER_MAX = 10000
 
     discount = VALUE_START + (VALUE_END - VALUE_START) * i / ITER_MAX
     return min(0.99, max(0, discount))
@@ -318,8 +318,8 @@ def main():
         n_tick = 0
 
         # g = tetris.BaseGame(my_engine, board_size=(20, 10), seed=i_episode)
-        random.seed(0)
-        g = tetris.BaseGame(my_engine, board_size=(20, 10), seed=0, queue=q.copy())
+        # random.seed(0)
+        g = tetris.BaseGame(my_engine, board_size=(20, 10), seed=i_episode, queue=q.copy())
 
         if i_episode % SAVE_EVERY == 0:
             print("Saving checkpoints ...")
@@ -388,7 +388,10 @@ def main():
             actions = ACTIONS.copy()
             actions, gs_next = get_next_games(g, actions)
             with torch.no_grad():
-                v_aft, i_aft, g_aft = max(zip([game2value(g_next) for g_next in gs_next], itertools.count(), gs_next))
+                rs_aft = [immediate_reward(a, _g, g) for a, _g in zip(actions, gs_next)]
+                vs_aft = [game2value(_g) for _g in gs_next]
+                rvs_aft = [r + discount * v for r, v in zip(rs_aft, vs_aft)]
+                rv_aft, i_aft, g_aft = max(zip(rvs_aft, itertools.count(), gs_next))
 
             # if random.random() <= random_action_epsilon:
             #     i_best, g_best = random.choice(list(zip(itertools.count(), gs_next)))
@@ -407,7 +410,7 @@ def main():
             # optim_heuristic.zero_grad()
             optim_full.zero_grad()
             v = game2value(g)
-            loss = criterion(reward + v_aft - v, torch.tensor(0))
+            loss = criterion(rv_aft - v, torch.tensor(0))
             # print(f"{float(rvs[i_best]):.2f} {float(v):.2f}")
             loss_total      += loss
             loss_per_update += float(loss)
@@ -424,7 +427,7 @@ def main():
 
             a = actions[i_aft]
             if random.random() <= random_action_epsilon:
-                g_aft = random.choice(gs_next)
+                a_aft, g_aft = random.choice(list(zip(actions, gs_next)))
                 if g_aft.lost:
                     should_game_end = True
                 else:

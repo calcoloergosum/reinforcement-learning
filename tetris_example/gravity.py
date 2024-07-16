@@ -59,7 +59,7 @@ class NESGravity(Gravity):
         #     if level >= i:
         #         drop_delay = NES_GRAV_FRAMES[i] / self.FRAMES_PER_SEC
         #         break
-        drop_delay = 0.0001
+        drop_delay = 1 / self.FRAMES_PER_SEC
         # drop_delay = 3 / self.FRAMES_PER_SEC
 
         now = self.now
