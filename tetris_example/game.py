@@ -27,8 +27,8 @@ COLORMAP = [
 
 N_QUEUE = 1
 
-BOARD_HEIGHT = 10
-BOARD_WIDTH = 5
+BOARD_HEIGHT = 6
+BOARD_WIDTH = 6
 
 
 def get_render_func(game: tetris.BaseGame):

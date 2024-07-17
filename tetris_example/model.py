@@ -42,14 +42,17 @@ LR = 0.001
 
 class TetrisNet(torch.nn.Module):
     ROI_HEIGHT = 4
-    CONV_CH = 16
+    CONV_CH = 64
     QUEUE_CH = 32
     INTERMED_CH = 32
 
     def __init__(self):
         super().__init__()
 
-        self.conv = torch.nn.Conv2d(1, self.CONV_CH, (self.ROI_HEIGHT, BOARD_WIDTH))
+        self.conv = torch.nn.Sequential(
+            torch.nn.Conv2d(1, self.CONV_CH, (self.ROI_HEIGHT, BOARD_WIDTH)),
+            torch.nn.ReLU(True),
+        )
         self.queuemap = torchvision.ops.MLP(N_QUEUE * 7 + len(ACTIONS), [self.QUEUE_CH])
         self.head = torchvision.ops.MLP(
             self.QUEUE_CH + self.CONV_CH * BOARD_HEIGHT,
@@ -72,18 +75,22 @@ class TetrisNet(torch.nn.Module):
 
 
 def get_discount(i: int = 0) -> Iterator[float]:
-    VALUE_START = 0.5
+    VALUE_START = 0.2
     VALUE_END   = 0.8
-    ITER_MAX = 1000000
+    ITER_MAX = 100000
 
     discount = VALUE_START + (VALUE_END - VALUE_START) * i / ITER_MAX
     return min(0.99, max(0, discount))
 
 
 def get_state2value_full():
-    # mlp = torchvision.ops.MLP(20 * 10 + N_QUEUE * 7, [256, 32, 1],)
-    # mlp = TetrisNet().cuda()
-    mlp = TetrisNet()
+    mlp = torchvision.ops.MLP(
+        BOARD_WIDTH * (BOARD_HEIGHT + TetrisNet.ROI_HEIGHT - 1) + N_QUEUE * 7 + 4,
+        # [1024, 1024, 64, 1],
+        [256, 256, 32, 1],
+    )
+    # mlp = TetrisNet()
+    # mlp = mlp.cuda()
     if (mlp_path := pathlib.Path(f"runs/{N_QUEUE}/mlp_full.pt")).exists():
         print("Loaded checkpoint! (model)")
         mlp.load_state_dict(torch.load(mlp_path))
@@ -103,9 +110,9 @@ def get_feature_heuristic2value():
 
 
 def get_optimizer_heuristic(params):
-    optimizer = torch.optim.SGD(params, lr=LR)
+    optimizer = torch.optim.SGD(params, lr=LR, momentum=0.,)
     # optimizer = torch.optim.SGD(params, lr=LR, momentum=0, dampening=0, weight_decay=0, nesterov=False)
-    # optimizer = torch.optim.Adam(params)
+    optimizer = torch.optim.Adam(params, lr=LR)
     if (optimizer_path := pathlib.Path(f"runs/{N_QUEUE}/optim_heuristic.pt")).exists():
         optimizer.load_state_dict(torch.load(optimizer_path))
     else:
@@ -148,7 +155,7 @@ def game2tensor(g: tetris.BaseGame, a: Action) -> torch.Tensor:
 
 
 def copy_game(g: tetris.BaseGame):
-    _g = tetris.BaseGame(my_engine, board=g.board.copy(), board_size=(20, 10))
+    _g = tetris.BaseGame(my_engine, board=g.board.copy(), board_size=(BOARD_HEIGHT, BOARD_WIDTH))
     _g.queue._pieces = g.queue._pieces.copy()
     _g.scorer.goal = g.scorer.goal
     _g.scorer.level = g.scorer.level
@@ -263,17 +270,17 @@ def immediate_reward(a: Action, g_bef: tetris.BaseGame, g_aft: tetris.BaseGame) 
 
     *_, n_hole_aft, diff_total_aft, max_height_aft = game2feature_heuristic(g_aft)
     *_, n_hole_bef, diff_total_bef, max_height_bef = game2feature_heuristic(g_bef)
-    reward += 10 * (g_aft.scorer.line_clears - g_bef.scorer.line_clears)
+    reward += (g_aft.scorer.line_clears - g_bef.scorer.line_clears)
     reward += .1 * (n_hole_bef - n_hole_aft)
     return reward
 
 
 def get_random_action_ratio(i):
     if i < 10000:
-        return 0.01
+        return 0.1
     if i < 100000:
-        return 0.01
-    return 0.01
+        return 0.1
+    return 0.1
 
 
 def main():
@@ -309,8 +316,8 @@ def main():
         random.setstate((a, tuple(b), c))
     # Load state done
 
-    q = [1, 2, 3, 4, 5, 6, 7] * 200
-    for i_episode in range(i_episode + 1, 100001):
+    # q = [1, 2, 3, 4, 5, 6, 7] * 200
+    for i_episode in range(i_episode + 1, 1000001):
         random_action_ratio = get_random_action_ratio(i_episode)
         discount = get_discount(i_episode)
         print(f"Reset! seed={i_episode} epsilon={random_action_ratio:.2f}" + " " * 50)
@@ -321,7 +328,8 @@ def main():
         n_tick = 0
 
         # random.seed(0)
-        g_bef = tetris.BaseGame(my_engine, board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=i_episode, queue=q.copy())
+        # g_bef = tetris.BaseGame(my_engine, board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=i_episode, queue=q.copy())
+        g_bef = tetris.BaseGame(my_engine, board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=i_episode)
 
         if i_episode % SAVE_EVERY == 0:
             print("Saving checkpoints ...")
@@ -335,14 +343,10 @@ def main():
                 "loss_per_update": loss_per_update,
             }))
 
-        # suppress repeated action (falls into infinite loop in tetris)
-        should_game_end = False
-        # suppress repeated action done
-
-        a = random.choice(ACTIONS)
-        g_aft = get_next_game(g_bef, a)
+        a_bef = random.choice(ACTIONS)
+        g_aft = get_next_game(g_bef, a_bef)
         assert g_aft is not None
-        reward = immediate_reward(a, g_bef, g_aft)
+        reward = immediate_reward(a_bef, g_bef, g_aft)
         reward_total += reward
         n_tick += 1
 
@@ -354,7 +358,7 @@ def main():
 
         while True:
             if i_update % 1000 == 0:
-                LOGGER.add_scalar('Update/Loss', loss_per_update / 100, i_update)
+                LOGGER.add_scalar('Update/Loss', loss_per_update / 1000, i_update)
                 LOGGER.add_scalar('Update/LearningRate', LR, i_update)
                 LOGGER.add_scalar('Update/RandomActionRatio', random_action_ratio, i_update)
                 loss_per_update = 0
@@ -374,6 +378,9 @@ def main():
                 LOGGER.add_scalar('Episode/RandomActionRatio',     random_action_ratio,   i_episode)
                 LOGGER.add_scalar('Episode/Discount',              discount,              i_episode)
                 LOGGER.add_scalar('Episode/NumberOfBlocksDropped', n_block_all,           i_episode)
+                if should_render:
+                    wait_func = render()
+                    wait_func(10)
                 break
 
             actions = ACTIONS.copy()
@@ -381,7 +388,6 @@ def main():
                 v_aft, _, a_aft = max((game2value(g_aft, a), i, a) for i, a in enumerate(actions))
             # debug
             if should_render:
-
                 wait_func = render()
                 wait_func(10)
             # debug done
@@ -389,17 +395,17 @@ def main():
             # forward again for learning
             # optim_heuristic.zero_grad()
             optim_full.zero_grad()
-            v = game2value(g_bef, a)
+            v = game2value(g_bef, a_bef)
             loss = criterion(v, reward + discount * v_aft)
             loss_float = float(loss)
             # print(f"{float(rvs[i_best]):.2f} {float(v):.2f}")
             loss_total      += loss_float
             loss_max        = max(loss_max, loss_float)
-            loss_max        = min(loss_min, loss_float)
+            loss_min        = min(loss_min, loss_float)
             loss_per_update += loss_float
             loss.backward()
             # torch.nn.utils.clip_grad_value_(feature_heuristic2value.parameters(), 100)
-            torch.nn.utils.clip_grad_value_(state2value_module.parameters(), 10)
+            # torch.nn.utils.clip_grad_value_(state2value_module.parameters(), 10)
             # optim_heuristic.step()
             optim_full.step()
             i_update += 1
@@ -414,6 +420,7 @@ def main():
 
             reward = immediate_reward(a_aft, g_aft, g_aft_aft)
             g_aft, g_bef = g_aft_aft, g_aft
+            a_bef = a_aft
             reward_total += reward
             n_tick += 1
 
