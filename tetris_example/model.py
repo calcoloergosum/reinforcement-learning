@@ -37,7 +37,7 @@ Action = Literal["left", "right", "soft_drop", "rotate"]
 RENDER = True
 LOGGER = SummaryWriter(f'runs/{N_QUEUE}')
 SAVE_EVERY = 100
-RENDER_EVERY = 100000000
+RENDER_EVERY = 100
 LR = 0.001
 
 class TetrisNet(torch.nn.Module):
@@ -82,13 +82,14 @@ def get_discount(i: int = 0) -> Iterator[float]:
 
 def get_state2value_full():
     # mlp = torchvision.ops.MLP(20 * 10 + N_QUEUE * 7, [256, 32, 1],)
-    mlp = TetrisNet().cuda()
+    # mlp = TetrisNet().cuda()
+    mlp = TetrisNet()
     if (mlp_path := pathlib.Path(f"runs/{N_QUEUE}/mlp_full.pt")).exists():
         print("Loaded checkpoint! (model)")
         mlp.load_state_dict(torch.load(mlp_path))
     else:
         print("Could not find checkpoint! Making new ...")
-    return mlp, lambda x: mlp(x[None].cuda())[0, 0].cpu()
+    return mlp, lambda x: mlp(x[None])[0, 0].cpu()
 
 
 def get_feature_heuristic2value():
@@ -268,12 +269,11 @@ def immediate_reward(a: Action, g_bef: tetris.BaseGame, g_aft: tetris.BaseGame) 
 
 
 def get_random_action_ratio(i):
-    EPSILON = 0.1
     if i < 10000:
-        return EPSILON
+        return 0.01
     if i < 100000:
-        return EPSILON
-    return EPSILON
+        return 0.01
+    return 0.01
 
 
 def main():
@@ -321,7 +321,7 @@ def main():
         n_tick = 0
 
         # random.seed(0)
-        g = tetris.BaseGame(my_engine, board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=i_episode, queue=q.copy())
+        g_bef = tetris.BaseGame(my_engine, board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=i_episode, queue=q.copy())
 
         if i_episode % SAVE_EVERY == 0:
             print("Saving checkpoints ...")
@@ -335,23 +335,22 @@ def main():
                 "loss_per_update": loss_per_update,
             }))
 
-        if RENDER and i_episode % RENDER_EVERY == 0:
-            should_render = True
-            render = get_render_func(g)
-        else:
-            should_render = False
-
         # suppress repeated action (falls into infinite loop in tetris)
         should_game_end = False
         # suppress repeated action done
 
         a = random.choice(ACTIONS)
-        g_aft = get_next_game(g, a)
+        g_aft = get_next_game(g_bef, a)
         assert g_aft is not None
-        reward = immediate_reward(a, g, g_aft)
+        reward = immediate_reward(a, g_bef, g_aft)
         reward_total += reward
         n_tick += 1
-        g = g_aft
+
+        if RENDER and i_episode % RENDER_EVERY == 0:
+            should_render = True
+            render = get_render_func(g_aft)
+        else:
+            should_render = False
 
         while True:
             if i_update % 1000 == 0:
@@ -360,17 +359,16 @@ def main():
                 LOGGER.add_scalar('Update/RandomActionRatio', random_action_ratio, i_update)
                 loss_per_update = 0
 
-            if g.lost:
-                assert should_game_end
-                n_block_all = (sum(np.array(g.board.data) > 0) + BOARD_WIDTH * g.scorer.line_clears) / 4
-                *_, n_hole, diff_total, _ = game2feature_heuristic(g)
+            if g_aft.lost:
+                n_block_all = (sum(np.array(g_aft.board.data) > 0) + BOARD_WIDTH * g_aft.scorer.line_clears) / 4
+                *_, n_hole, diff_total, _ = game2feature_heuristic(g_aft)
                 LOGGER.add_scalar('Episode/NumberOfHoles',         n_hole,                i_episode)
                 LOGGER.add_scalar('Episode/Bumpyness',             diff_total,            i_episode)
                 LOGGER.add_scalar('Episode/RewardAveragePerTick',  reward_total / n_tick, i_episode)
                 LOGGER.add_scalar('Episode/RewardTotal',           reward_total,          i_episode)
                 LOGGER.add_scalar('Episode/NumberOfTicks',         n_tick,                i_episode)
-                LOGGER.add_scalar('Episode/NumberOfLineClear',     g.scorer.line_clears,  i_episode)
-                LOGGER.add_scalar('Episode/LossAve',           loss_total / n_tick,   i_episode)
+                LOGGER.add_scalar('Episode/NumberOfLineClear',     g_aft.scorer.line_clears,  i_episode)
+                LOGGER.add_scalar('Episode/LossAve',               loss_total / n_tick,   i_episode)
                 LOGGER.add_scalar('Episode/LossMax',               loss_max,              i_episode)
                 LOGGER.add_scalar('Episode/LossMin',               loss_min,              i_episode)
                 LOGGER.add_scalar('Episode/RandomActionRatio',     random_action_ratio,   i_episode)
@@ -379,18 +377,11 @@ def main():
                 break
 
             actions = ACTIONS.copy()
-            actions, gs_next = get_next_games(g, actions)
             with torch.no_grad():
-                rs_aft = [immediate_reward(a, _g, g) for a, _g in zip(actions, gs_next)]
-                vs_aft = [game2value(_g, a) for _g, a in zip(gs_next, actions)]
-                rvs_aft = [r + discount * v for r, v in zip(rs_aft, vs_aft)]
-                rv_aft, _, a_aft, g_aft = max(zip(rvs_aft, itertools.count(), actions, gs_next))
-
-            if g_aft.lost:
-                should_game_end = True
-
+                v_aft, _, a_aft = max((game2value(g_aft, a), i, a) for i, a in enumerate(actions))
             # debug
             if should_render:
+
                 wait_func = render()
                 wait_func(10)
             # debug done
@@ -398,8 +389,8 @@ def main():
             # forward again for learning
             # optim_heuristic.zero_grad()
             optim_full.zero_grad()
-            v = game2value(g, a_aft)
-            loss = criterion(rv_aft - v, torch.tensor(0))
+            v = game2value(g_bef, a)
+            loss = criterion(v, reward + discount * v_aft)
             loss_float = float(loss)
             # print(f"{float(rvs[i_best]):.2f} {float(v):.2f}")
             loss_total      += loss_float
@@ -414,24 +405,20 @@ def main():
             i_update += 1
 
             # apply action
-            assert id(g) == id(g.gravity.game)
+            assert id(g_bef) == id(g_bef.gravity.game)
             assert id(g_aft) == id(g_aft.gravity.game)
 
             if random.random() <= random_action_ratio:
-                a_aft, g_aft = random.choice(list(zip(actions, gs_next)))
-                if g_aft.lost:
-                    should_game_end = True
-                else:
-                    should_game_end = False
+                a_aft = random.choice(ACTIONS)
+            g_aft_aft = get_next_game(g_aft, a_aft)
 
-            assert should_game_end == g_aft.lost, f"{should_game_end} != {g_aft.lost}"
-            reward = immediate_reward(a_aft, g, g_aft)
-            g = g_aft   
+            reward = immediate_reward(a_aft, g_aft, g_aft_aft)
+            g_aft, g_bef = g_aft_aft, g_aft
             reward_total += reward
             n_tick += 1
 
             if should_render:
-                render = get_render_func(g)
+                render = get_render_func(g_aft_aft)
 
     # state = game2tensor(game)
     # feat = feature_extractor(torch.stack((state, state)))
