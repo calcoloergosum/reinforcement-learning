@@ -9,7 +9,7 @@ KEY_S = ord('s')
 KEY_W = ord('w')
 KEY_SPACE = 32
 CV2_WINDOW_NAME = 'tetris'
-cv2.namedWindow(CV2_WINDOW_NAME, cv2.WINDOW_NORMAL)
+# cv2.namedWindow(CV2_WINDOW_NAME, cv2.WINDOW_NORMAL)
 
 # IJLOSTZ
 COLORMAP = [
@@ -27,8 +27,8 @@ COLORMAP = [
 
 N_QUEUE = 1
 
-BOARD_HEIGHT = 20
-BOARD_WIDTH = 10
+BOARD_HEIGHT = 10
+BOARD_WIDTH = 5
 
 
 def get_render_func(game: tetris.BaseGame):
