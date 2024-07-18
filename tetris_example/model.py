@@ -32,13 +32,14 @@ from torch.utils.tensorboard import SummaryWriter
 #     With 98% chance, the action is conducted as intended
 
 State = tetris.BaseGame
-ACTIONS = ["left", "right", "soft_drop", "rotate"]
-Action = Literal["left", "right", "soft_drop", "rotate"]
+# Action = Literal["left", "right", "soft_drop", "rotate"]
+ACTIONS = ["left", "right", "wait", "rotate"]
+Action = Literal["left", "right", "wait", "rotate"]
 RENDER = True
 LOGGER = SummaryWriter(f'runs/{N_QUEUE}')
 SAVE_EVERY = 100
 RENDER_EVERY = 100
-LR = 0.001
+LR = 0.01
 
 class TetrisNet(torch.nn.Module):
     ROI_HEIGHT = 4
@@ -75,17 +76,17 @@ class TetrisNet(torch.nn.Module):
 
 
 def get_discount(i: int = 0) -> Iterator[float]:
-    VALUE_START = 0.2
-    VALUE_END   = 0.8
-    ITER_MAX = 100000
+    VALUE_START = 0.99
+    VALUE_END   = 0.999
+    ITER_MAX = 10000000
 
     discount = VALUE_START + (VALUE_END - VALUE_START) * i / ITER_MAX
-    return min(0.99, max(0, discount))
+    return min(0.999, max(0, discount))
 
 
 def get_state2value_full():
     mlp = torchvision.ops.MLP(
-        BOARD_WIDTH * (BOARD_HEIGHT + TetrisNet.ROI_HEIGHT - 1) + N_QUEUE * 7 + 4,
+        BOARD_WIDTH * (BOARD_HEIGHT + TetrisNet.ROI_HEIGHT - 1) + N_QUEUE * 7 + len(ACTIONS),
         # [1024, 1024, 64, 1],
         [256, 256, 32, 1],
     )
@@ -96,7 +97,7 @@ def get_state2value_full():
         mlp.load_state_dict(torch.load(mlp_path))
     else:
         print("Could not find checkpoint! Making new ...")
-    return mlp, lambda x: mlp(x[None])[0, 0].cpu()
+    return mlp, lambda xs: mlp(xs)[:, 0].cpu()
 
 
 def get_feature_heuristic2value():
@@ -112,7 +113,7 @@ def get_feature_heuristic2value():
 def get_optimizer_heuristic(params):
     optimizer = torch.optim.SGD(params, lr=LR, momentum=0.,)
     # optimizer = torch.optim.SGD(params, lr=LR, momentum=0, dampening=0, weight_decay=0, nesterov=False)
-    optimizer = torch.optim.Adam(params, lr=LR)
+    # optimizer = torch.optim.Adam(params, lr=LR)
     if (optimizer_path := pathlib.Path(f"runs/{N_QUEUE}/optim_heuristic.pt")).exists():
         optimizer.load_state_dict(torch.load(optimizer_path))
     else:
@@ -187,12 +188,13 @@ def get_next_games(g: tetris.BaseGame, actions=ACTIONS) -> Tuple[List[Action], L
 
 def get_next_game(g: tetris.BaseGame, a: Action) -> tetris.BaseGame | None:
     _g = copy_game(g)
-    try:
-        getattr(_g, a)()
+    if a == 'wait':
         _g.gravity.tick()
         _g.tick()
-    except AssertionError:  # cannot rotate
-        return None
+        return _g
+    getattr(_g, a)()
+    _g.gravity.tick()
+    _g.tick()
     return _g
     
 
@@ -245,8 +247,11 @@ my_engine = EngineFactory(
 )
 
 
+def number_of_blocks_dropped(g: tetris.BaseGame) -> float:
+    return (sum(np.array(g.board.data) > 0) + BOARD_WIDTH * g.scorer.line_clears) / 4
+
+
 def immediate_reward(a: Action, g_bef: tetris.BaseGame, g_aft: tetris.BaseGame) -> float:
-    i_episode = 0
     reward = 0.
 
     # Reward some actions
@@ -258,29 +263,31 @@ def immediate_reward(a: Action, g_bef: tetris.BaseGame, g_aft: tetris.BaseGame) 
         case 'right':
             pass
         case 'soft_drop':
-            # reward -= 0.1
+            pass
+        case 'wait':
             pass
         case _:
             raise RuntimeError("Not Implemented!")
     # Reward some actions done
 
-    # Reward surviving
-    # reward -= 0.001
-    # Reward surviving done
-
-    *_, n_hole_aft, diff_total_aft, max_height_aft = game2feature_heuristic(g_aft)
-    *_, n_hole_bef, diff_total_bef, max_height_bef = game2feature_heuristic(g_bef)
+    # *_, n_hole_aft, diff_total_aft, max_height_aft = game2feature_heuristic(g_aft)
+    # *_, n_hole_bef, diff_total_bef, max_height_bef = game2feature_heuristic(g_bef)
     reward += (g_aft.scorer.line_clears - g_bef.scorer.line_clears)
-    reward += .1 * (n_hole_bef - n_hole_aft)
+    if number_of_blocks_dropped(g_aft) != number_of_blocks_dropped(g_bef):
+        reward += 1
+    # reward += .1 * (n_hole_bef - n_hole_aft)
+
+    if g_aft.lost:
+        reward -= 100
     return reward
 
 
 def get_random_action_ratio(i):
     if i < 10000:
-        return 0.1
+        return 0.01
     if i < 100000:
-        return 0.1
-    return 0.1
+        return 0.01
+    return 0.01
 
 
 def main():
@@ -288,20 +295,11 @@ def main():
     optim_full = get_optimizer_full(state2value_module.parameters())
 
     def game2value(g: tetris.BaseGame, a: Action) -> torch.Tensor:
-        return state2value(game2tensor(g, a))
-    # feature_heuristic2value = get_feature_heuristic2value()
-    # optim_heuristic = get_optimizer_heuristic(feature_heuristic2value.parameters())
-    # def game2value(g):
-    #     return feature_heuristic2value(
-    #         torch.tensor(
-    #             game2feature_heuristic(g),
-    #             dtype=torch.float32,
-    #         )[None]
-    #     )[0]
+        return state2value(game2tensor(g, a)[None])
 
     criterion = torch.nn.L1Loss()
 
-    random.seed(0)
+    random.seed(1)
     i_episode = 0
     i_update = 0
     loss_per_update = 0
@@ -316,8 +314,9 @@ def main():
         random.setstate((a, tuple(b), c))
     # Load state done
 
-    # q = [1, 2, 3, 4, 5, 6, 7] * 200
-    for i_episode in range(i_episode + 1, 1000001):
+    # q = [4] * 200
+    q = [1] * 200
+    for i_episode in range(i_episode + 1, 10000001):
         random_action_ratio = get_random_action_ratio(i_episode)
         discount = get_discount(i_episode)
         print(f"Reset! seed={i_episode} epsilon={random_action_ratio:.2f}" + " " * 50)
@@ -328,8 +327,8 @@ def main():
         n_tick = 0
 
         # random.seed(0)
-        # g_bef = tetris.BaseGame(my_engine, board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=i_episode, queue=q.copy())
-        g_bef = tetris.BaseGame(my_engine, board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=i_episode)
+        g_bef = tetris.BaseGame(my_engine, board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=i_episode, queue=q.copy())
+        # g_bef = tetris.BaseGame(my_engine, board_size=(BOARD_HEIGHT, BOARD_WIDTH))
 
         if i_episode % SAVE_EVERY == 0:
             print("Saving checkpoints ...")
@@ -356,7 +355,12 @@ def main():
         else:
             should_render = False
 
+        v_aft, _, a_aft = max((game2value(g_aft, a), i, a) for i, a in enumerate(ACTIONS))
+        episode = []
+        episode.append((g_bef, a_bef, reward, g_aft, a_aft, v_aft))
         while True:
+            if len(episode) >= 1000:
+                break
             if i_update % 1000 == 0:
                 LOGGER.add_scalar('Update/Loss', loss_per_update / 1000, i_update)
                 LOGGER.add_scalar('Update/LearningRate', LR, i_update)
@@ -364,7 +368,6 @@ def main():
                 loss_per_update = 0
 
             if g_aft.lost:
-                n_block_all = (sum(np.array(g_aft.board.data) > 0) + BOARD_WIDTH * g_aft.scorer.line_clears) / 4
                 *_, n_hole, diff_total, _ = game2feature_heuristic(g_aft)
                 LOGGER.add_scalar('Episode/NumberOfHoles',         n_hole,                i_episode)
                 LOGGER.add_scalar('Episode/Bumpyness',             diff_total,            i_episode)
@@ -377,7 +380,7 @@ def main():
                 LOGGER.add_scalar('Episode/LossMin',               loss_min,              i_episode)
                 LOGGER.add_scalar('Episode/RandomActionRatio',     random_action_ratio,   i_episode)
                 LOGGER.add_scalar('Episode/Discount',              discount,              i_episode)
-                LOGGER.add_scalar('Episode/NumberOfBlocksDropped', n_block_all,           i_episode)
+                LOGGER.add_scalar('Episode/NumberOfBlocksDropped', number_of_blocks_dropped(g_aft), i_episode)
                 if should_render:
                     wait_func = render()
                     wait_func(10)
@@ -394,32 +397,30 @@ def main():
 
             # forward again for learning
             # optim_heuristic.zero_grad()
-            optim_full.zero_grad()
-            v = game2value(g_bef, a_bef)
-            loss = criterion(v, reward + discount * v_aft)
-            loss_float = float(loss)
-            # print(f"{float(rvs[i_best]):.2f} {float(v):.2f}")
-            loss_total      += loss_float
-            loss_max        = max(loss_max, loss_float)
-            loss_min        = min(loss_min, loss_float)
-            loss_per_update += loss_float
-            loss.backward()
-            # torch.nn.utils.clip_grad_value_(feature_heuristic2value.parameters(), 100)
+            # optim_full.zero_grad()
+            # v = game2value(g_bef, a_bef)
+            # loss = criterion(v, reward + discount * v_aft)
+            # loss_float = float(loss)
+            # loss_total      += loss_float
+            # loss_max        = max(loss_max, loss_float)
+            # loss_min        = min(loss_min, loss_float)
+            # loss_per_update += loss_float
+            # loss.backward()
             # torch.nn.utils.clip_grad_value_(state2value_module.parameters(), 10)
-            # optim_heuristic.step()
-            optim_full.step()
+            # optim_full.step()
             i_update += 1
 
             # apply action
             assert id(g_bef) == id(g_bef.gravity.game)
             assert id(g_aft) == id(g_aft.gravity.game)
 
+            episode.append((g_bef, a_bef, reward, g_aft, a_aft, v_aft))
             if random.random() <= random_action_ratio:
                 a_aft = random.choice(ACTIONS)
             g_aft_aft = get_next_game(g_aft, a_aft)
 
-            reward = immediate_reward(a_aft, g_aft, g_aft_aft)
             g_aft, g_bef = g_aft_aft, g_aft
+            reward = immediate_reward(a_aft, g_bef, g_aft)
             a_bef = a_aft
             reward_total += reward
             n_tick += 1
@@ -427,6 +428,30 @@ def main():
             if should_render:
                 render = get_render_func(g_aft_aft)
 
+        gs_bef, as_bef, rs, gs_aft, as_aft, vs_aft = list(zip(*episode))
+
+        # Monte Carlo target
+        arr_rwrd = np.array(rs + (0,) * (len(rs) - 1))
+        window_size = len(rs)
+        xs = np.lib.stride_tricks.as_strided(
+            arr_rwrd,
+            (arr_rwrd.size - window_size + 1, window_size), [arr_rwrd.strides[0], arr_rwrd.strides[0]]
+        )
+        # sum(rs[i] * discount ** i for i in np.nonzero(rs)[0])
+        targs = (xs * (discount ** np.arange(len(rs)))).sum(axis=1)
+        targs_mc = torch.tensor(targs)
+        # Monte Carlo target done
+
+        # Q learning target
+        with torch.no_grad():
+            targs_td = discount * torch.stack(vs_aft).flatten() + torch.tensor(rs)
+        # Q learning target done
+
+        optim_full.zero_grad()
+        vs = state2value(torch.stack([game2tensor(g, a) for g, a in zip(gs_bef, as_bef)]))
+        loss = criterion(vs, .5 * (targs_mc + targs_td))
+        loss.backward()
+        optim_full.step()
     # state = game2tensor(game)
     # feat = feature_extractor(torch.stack((state, state)))
 
