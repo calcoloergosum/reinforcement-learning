@@ -4,7 +4,7 @@ import tetris.impl.rotation
 import tetris.impl.scorer
 from tetris.engine import EngineFactory
 import pathlib
-from typing import Literal, List, Tuple, Iterator
+from typing import Iterator
 import itertools
 import json
 import numpy as np
@@ -12,9 +12,8 @@ import tetris
 import torch
 import torchvision
 import random
-from .game import BOARD_WIDTH, BOARD_HEIGHT, N_QUEUE, get_render_func
 from torch.utils.tensorboard import SummaryWriter
-
+from .board import get_next_game, Action, BOARD_WIDTH, BOARD_HEIGHT, N_QUEUE, get_random_state, number_of_blocks_dropped
 # Modeling tetris agent as Markov model M = (State, Action, Probability)
 # State := (Field, Queue):
 #     Field is boolean of W x H = 10 x 20
@@ -32,14 +31,13 @@ from torch.utils.tensorboard import SummaryWriter
 #     With 98% chance, the action is conducted as intended
 
 State = tetris.BaseGame
-# Action = Literal["left", "right", "soft_drop", "rotate"]
 ACTIONS = ["left", "right", "wait", "rotate"]
-Action = Literal["left", "right", "wait", "rotate"]
 RENDER = True
 LOGGER = SummaryWriter(f'runs/{N_QUEUE}')
 SAVE_EVERY = 100
 RENDER_EVERY = 100
-LR = 0.01
+LR = 0.001
+
 
 class TetrisNet(torch.nn.Module):
     ROI_HEIGHT = 4
@@ -84,50 +82,28 @@ def get_discount(i: int = 0) -> Iterator[float]:
     return min(0.999, max(0, discount))
 
 
-def get_state2value_full():
-    mlp = torchvision.ops.MLP(
-        BOARD_WIDTH * (BOARD_HEIGHT + TetrisNet.ROI_HEIGHT - 1) + N_QUEUE * 7 + len(ACTIONS),
-        # [1024, 1024, 64, 1],
-        [256, 256, 32, 1],
-    )
-    # mlp = TetrisNet()
+def get_state2value():
+    # mlp = torchvision.ops.MLP(
+    #     BOARD_WIDTH * (BOARD_HEIGHT + TetrisNet.ROI_HEIGHT - 1) + N_QUEUE * 7 + len(ACTIONS),
+    #     # [1024, 1024, 64, 1],
+    #     [256, 256, 32, 1],
+    # )
+    mlp = TetrisNet()
     # mlp = mlp.cuda()
     if (mlp_path := pathlib.Path(f"runs/{N_QUEUE}/mlp_full.pt")).exists():
+        mlp.load_state_dict(torch.load(mlp_path))
         print("Loaded checkpoint! (model)")
-        mlp.load_state_dict(torch.load(mlp_path))
-    else:
-        print("Could not find checkpoint! Making new ...")
-    return mlp, lambda xs: mlp(xs)[:, 0].cpu()
-
-
-def get_feature_heuristic2value():
-    mlp = torchvision.ops.MLP(7, [14, 16, 8, 4, 1], norm_layer=None)
-    if (mlp_path := pathlib.Path(f"runs/{N_QUEUE}/mlp_heuristic.pt")).exists():
-        print("Loaded checkpoint! (optimizer)")
-        mlp.load_state_dict(torch.load(mlp_path))
     else:
         print("Could not find checkpoint! Making new ...")
     return mlp
 
 
-def get_optimizer_heuristic(params):
-    optimizer = torch.optim.SGD(params, lr=LR, momentum=0.,)
+def get_optimizer(params):
     # optimizer = torch.optim.SGD(params, lr=LR, momentum=0, dampening=0, weight_decay=0, nesterov=False)
-    # optimizer = torch.optim.Adam(params, lr=LR)
-    if (optimizer_path := pathlib.Path(f"runs/{N_QUEUE}/optim_heuristic.pt")).exists():
-        optimizer.load_state_dict(torch.load(optimizer_path))
-    else:
-        print("Could not find checkpoint! Making new ...")
-    for g in optimizer.param_groups:
-        g['lr'] = LR
-    return optimizer
-
-
-def get_optimizer_full(params):
-    optimizer = torch.optim.SGD(params, lr=LR, momentum=0, dampening=0, weight_decay=0, nesterov=False)
-    # optimizer = torch.optim.Adam(params)
+    optimizer = torch.optim.Adam(params, lr=LR)
     if (optimizer_path := pathlib.Path(f"runs/{N_QUEUE}/optim_full.pt")).exists():
         optimizer.load_state_dict(torch.load(optimizer_path))
+        print("Loaded checkpoint! (optimizer)")
     else:
         print("Could not find checkpoint! Making new ...")
     for g in optimizer.param_groups:
@@ -143,7 +119,7 @@ def action2tensor(a: Action) -> torch.Tensor:
     return torch.nn.functional.one_hot(torch.tensor(ACTIONS.index(a)), num_classes=len(ACTIONS))
 
 
-def game2tensor(g: tetris.BaseGame, a: Action) -> torch.Tensor:
+def state_action2tensor(g: tetris.BaseGame, a: Action) -> torch.Tensor:
     board = torch.tensor(g.board[BOARD_HEIGHT - TetrisNet.ROI_HEIGHT + 1:].data)
     field = torch.tensor(g.get_playfield(buffer_lines=TetrisNet.ROI_HEIGHT - 1).data)
     field[field == 8] = 0  # Remove ghost
@@ -155,48 +131,16 @@ def game2tensor(g: tetris.BaseGame, a: Action) -> torch.Tensor:
     return vec
 
 
-def copy_game(g: tetris.BaseGame):
-    _g = tetris.BaseGame(my_engine, board=g.board.copy(), board_size=(BOARD_HEIGHT, BOARD_WIDTH))
-    _g.queue._pieces = g.queue._pieces.copy()
-    _g.scorer.goal = g.scorer.goal
-    _g.scorer.level = g.scorer.level
-    _g.scorer.score = g.scorer.score
-    _g.scorer.line_clears = g.scorer.line_clears
-    _g.gravity.last_drop = g.gravity.last_drop
-    _g.gravity.now = g.gravity.now
-    _g.piece = g.piece.__class__(
-        type=g.piece.type,
-        x=g.piece.x,
-        y=g.piece.y,
-        r=g.piece.r,
-        minos=g.piece.minos,
-    )
-    # _g.board._data = g.board._data
-    # print(_g.playfield)
-    return _g
-
-
-def get_next_games(g: tetris.BaseGame, actions=ACTIONS) -> Tuple[List[Action], List[tetris.BaseGame]]:
-    ret_g = []
-    ret_a = []
-    for a in actions:
-        if (_g := get_next_game(g, a)) is not None:
-            ret_g += [_g]
-            ret_a += [a]
-    return ret_a, ret_g
-
-
-def get_next_game(g: tetris.BaseGame, a: Action) -> tetris.BaseGame | None:
-    _g = copy_game(g)
-    if a == 'wait':
-        _g.gravity.tick()
-        _g.tick()
-        return _g
-    getattr(_g, a)()
-    _g.gravity.tick()
-    _g.tick()
-    return _g
-    
+def state2tensor(g: tetris.BaseGame) -> torch.Tensor:
+    board = torch.tensor(g.board[BOARD_HEIGHT - TetrisNet.ROI_HEIGHT + 1:].data)
+    field = torch.tensor(g.get_playfield(buffer_lines=TetrisNet.ROI_HEIGHT - 1).data)
+    field[field == 8] = 0  # Remove ghost
+    field_mask = field - board > 0
+    board = (field > 0).type(torch.float32)
+    board[field_mask] *= -1
+    queue_action = [piece2tensor(p) for p in g.queue[:N_QUEUE]]
+    vec = torch.concat((board, *queue_action)).type(torch.float32)
+    return vec
 
 
 def column2height(c):
@@ -247,213 +191,202 @@ my_engine = EngineFactory(
 )
 
 
-def number_of_blocks_dropped(g: tetris.BaseGame) -> float:
-    return (sum(np.array(g.board.data) > 0) + BOARD_WIDTH * g.scorer.line_clears) / 4
+from collections import deque
+
+class DequeSARSA:
+    def __init__(self, maxlen: int) -> None:
+        self.sar = None
+        self.queue = deque(maxlen=maxlen)
+
+    def push(self, sarsd):
+        t_, r_, _, done = state_action2tensor(*sarsd[:2]), *sarsd[2:]
+        if self.sar is not None:
+            self.queue.append((*self.sar, t_))
+
+        if done:
+            # assert self.sar is not None
+            self.queue.append((*self.sar, None))
+            self.sar = None
+            return
+        else:
+            self.sar = (t_, r_)
+        return
 
 
-def immediate_reward(a: Action, g_bef: tetris.BaseGame, g_aft: tetris.BaseGame) -> float:
-    reward = 0.
+class DequeSAR:
+    def __init__(self, maxlen: int, acceptance_ratio: float) -> None:
+        self.queue = deque(maxlen=maxlen)
+        self.acceptance_ratio = acceptance_ratio
 
-    # Reward some actions
-    match a:
-        case 'rotate':
-            pass
-        case 'left':
-            pass
-        case 'right':
-            pass
-        case 'soft_drop':
-            pass
-        case 'wait':
-            pass
-        case _:
-            raise RuntimeError("Not Implemented!")
-    # Reward some actions done
-
-    # *_, n_hole_aft, diff_total_aft, max_height_aft = game2feature_heuristic(g_aft)
-    # *_, n_hole_bef, diff_total_bef, max_height_bef = game2feature_heuristic(g_bef)
-    reward += (g_aft.scorer.line_clears - g_bef.scorer.line_clears)
-    if number_of_blocks_dropped(g_aft) != number_of_blocks_dropped(g_bef):
-        reward += 1
-    # reward += .1 * (n_hole_bef - n_hole_aft)
-
-    if g_aft.lost:
-        reward -= 100
-    return reward
+    def push(self, sarsd):
+        accept = random.random() < self.acceptance_ratio
+        accept |= sarsd[2] > 1  # Positive reward; line clear
+        if accept:
+            t_, r_, s, done = state_action2tensor(*sarsd[:2]), sarsd[2], state2tensor(sarsd[3]), sarsd[4]
+            self.queue.append((t_, r_, s, done))
+        return
 
 
-def get_random_action_ratio(i):
-    if i < 10000:
-        return 0.01
-    if i < 100000:
-        return 0.01
-    return 0.01
+class Accumulator():
+    def __init__(self):
+        self.sum = 0
+        self.n = 0
+        self._max = -1e7
+        self._min = 1e7
+        
+    def clear(self):
+        self.sum = 0
+        self.n = 0
+        self._max = -1e7
+        self._min = 1e7
+    
+    def add(self, v):
+        self.sum += v
+        self.n += 1
+        self._min = min(self._min, v)
+        self._max = max(self._max, v)
+
+    @property
+    def average(self):
+        return 0 if self.n == 0 else self.sum / self.n
+
+    @property
+    def min(self):
+        return 0 if self.n == 0 else self._min
+
+    @property
+    def max(self):
+        return 0 if self.n == 0 else self._max
+
+
+def get_random_action_ratio(v_initial: float, v_final: float, n_current: int, n_final: int):
+    return (
+        v_final + (max(n_final - n_current, 0) * (v_initial - v_final) / n_final)
+    )
 
 
 def main():
-    state2value_module, state2value = get_state2value_full()
-    optim_full = get_optimizer_full(state2value_module.parameters())
+    # constants
+    method = 'Q-learning'
+    REPLAY_QUEUE_SIZE = 500_000
+    N_STEP = 1_000_000
+    BATCH_SIZE = 512
+    discount = 0.99
+    RANDOM_ACTION_INITIAL_VALUE = 1.
+    RANDOM_ACTION_FINAL_VALUE   = 1e-2
+    RANDOM_ACTION_FINAL_STEP    = 5_000
+    # constants done
+    q_func = get_state2value()
+    q_func.train()
+    optim_full = get_optimizer(q_func.parameters())
 
-    def game2value(g: tetris.BaseGame, a: Action) -> torch.Tensor:
-        return state2value(game2tensor(g, a)[None])
+    state = get_random_state(3, my_engine, None)
+    match method:
+        case 'SARSA':
+            replay_queue = DequeSARSA(REPLAY_QUEUE_SIZE)  # SARSA
+        case 'Q-learning':
+            replay_queue = DequeSAR(REPLAY_QUEUE_SIZE, acceptance_ratio=0.5)  # Q-learning
+        case _:
+            raise NotImplementedError(method)
+    loss_acc = Accumulator()
+    reward_acc = Accumulator()
 
-    criterion = torch.nn.L1Loss()
-
-    random.seed(1)
     i_episode = 0
-    i_update = 0
-    loss_per_update = 0
+    i_step = 1
+    if (p := pathlib.Path(f"runs/{N_QUEUE}/progress.txt")).exists():
+        progress = json.loads(p.open('r').read())
+        i_step, i_episode = progress['i_step'], progress['i_episode']
 
-    # Load state
-    if (txtpath := pathlib.Path(f"runs/{N_QUEUE}/progress.json")).exists():
-        d = json.loads(txtpath.read_text())
-        i_episode = d.get("i_episode", 0)
-        i_update = d.get("i_update", 0)
-        loss_per_update = d.get("loss_per_update", 0)
-        a, b, c = d["random_state"]
-        random.setstate((a, tuple(b), c))
-    # Load state done
-
-    # q = [4] * 200
-    q = [1] * 200
-    for i_episode in range(i_episode + 1, 10000001):
-        random_action_ratio = get_random_action_ratio(i_episode)
-        discount = get_discount(i_episode)
-        print(f"Reset! seed={i_episode} epsilon={random_action_ratio:.2f}" + " " * 50)
-        reward_total = 0.
-        loss_total = 0.
-        loss_max = -10000000.
-        loss_min = +10000000.
-        n_tick = 0
-
-        # random.seed(0)
-        g_bef = tetris.BaseGame(my_engine, board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=i_episode, queue=q.copy())
-        # g_bef = tetris.BaseGame(my_engine, board_size=(BOARD_HEIGHT, BOARD_WIDTH))
-
-        if i_episode % SAVE_EVERY == 0:
-            print("Saving checkpoints ...")
-            torch.save(state2value_module.state_dict(), f"runs/{N_QUEUE}/mlp_full.pt")
-            torch.save(optim_full.state_dict(),
-                       f"runs/{N_QUEUE}/optim_full.pt")
-            pathlib.Path(f"runs/{N_QUEUE}/progress.json").write_text(json.dumps({
-                "i_episode": i_episode,
-                "random_state":     random.getstate(),
-                "i_update": i_update,
-                "loss_per_update": loss_per_update,
-            }))
-
-        a_bef = random.choice(ACTIONS)
-        g_aft = get_next_game(g_bef, a_bef)
-        assert g_aft is not None
-        reward = immediate_reward(a_bef, g_bef, g_aft)
-        reward_total += reward
-        n_tick += 1
-
-        if RENDER and i_episode % RENDER_EVERY == 0:
-            should_render = True
-            render = get_render_func(g_aft)
+    for i_step in range(i_step, N_STEP):
+        # policy
+        # arsd_list = get_next_n_best_game(state, action, my_engine)
+        random_action_ratio = get_random_action_ratio(RANDOM_ACTION_INITIAL_VALUE, RANDOM_ACTION_FINAL_VALUE, i_episode, RANDOM_ACTION_FINAL_STEP)
+        if random.random() <= random_action_ratio:
+            action = random.choice(ACTIONS)
         else:
-            should_render = False
-
-        v_aft, _, a_aft = max((game2value(g_aft, a), i, a) for i, a in enumerate(ACTIONS))
-        episode = []
-        episode.append((g_bef, a_bef, reward, g_aft, a_aft, v_aft))
-        while True:
-            if len(episode) >= 1000:
-                break
-            if i_update % 1000 == 0:
-                LOGGER.add_scalar('Update/Loss', loss_per_update / 1000, i_update)
-                LOGGER.add_scalar('Update/LearningRate', LR, i_update)
-                LOGGER.add_scalar('Update/RandomActionRatio', random_action_ratio, i_update)
-                loss_per_update = 0
-
-            if g_aft.lost:
-                *_, n_hole, diff_total, _ = game2feature_heuristic(g_aft)
-                LOGGER.add_scalar('Episode/NumberOfHoles',         n_hole,                i_episode)
-                LOGGER.add_scalar('Episode/Bumpyness',             diff_total,            i_episode)
-                LOGGER.add_scalar('Episode/RewardAveragePerTick',  reward_total / n_tick, i_episode)
-                LOGGER.add_scalar('Episode/RewardTotal',           reward_total,          i_episode)
-                LOGGER.add_scalar('Episode/NumberOfTicks',         n_tick,                i_episode)
-                LOGGER.add_scalar('Episode/NumberOfLineClear',     g_aft.scorer.line_clears,  i_episode)
-                LOGGER.add_scalar('Episode/LossAve',               loss_total / n_tick,   i_episode)
-                LOGGER.add_scalar('Episode/LossMax',               loss_max,              i_episode)
-                LOGGER.add_scalar('Episode/LossMin',               loss_min,              i_episode)
-                LOGGER.add_scalar('Episode/RandomActionRatio',     random_action_ratio,   i_episode)
-                LOGGER.add_scalar('Episode/Discount',              discount,              i_episode)
-                LOGGER.add_scalar('Episode/NumberOfBlocksDropped', number_of_blocks_dropped(g_aft), i_episode)
-                if should_render:
-                    wait_func = render()
-                    wait_func(10)
-                break
-
-            actions = ACTIONS.copy()
+            q_func.eval()
             with torch.no_grad():
-                v_aft, _, a_aft = max((game2value(g_aft, a), i, a) for i, a in enumerate(actions))
-            # debug
-            if should_render:
-                wait_func = render()
-                wait_func(10)
-            # debug done
+                i_a = torch.argmax(q_func(torch.stack([state_action2tensor(state, a) for a in ACTIONS])).reshape(-1))
+                action = ACTIONS[i_a]
+            q_func.train()
+        reward, state_, over = get_next_game(state, action, my_engine)
+        replay_queue.push((state, action, reward, state_, over))
+        reward_acc.add(reward)
+        # policy done
 
-            # forward again for learning
-            # optim_heuristic.zero_grad()
-            # optim_full.zero_grad()
-            # v = game2value(g_bef, a_bef)
-            # loss = criterion(v, reward + discount * v_aft)
-            # loss_float = float(loss)
-            # loss_total      += loss_float
-            # loss_max        = max(loss_max, loss_float)
-            # loss_min        = min(loss_min, loss_float)
-            # loss_per_update += loss_float
-            # loss.backward()
-            # torch.nn.utils.clip_grad_value_(state2value_module.parameters(), 10)
-            # optim_full.step()
-            i_update += 1
+        state = state_
 
-            # apply action
-            assert id(g_bef) == id(g_bef.gravity.game)
-            assert id(g_aft) == id(g_aft.gravity.game)
+        if over or loss_acc.n > 10_000:  # force terminate if tick more than 10k
+            i_episode += 1
+            report(state_, reward_acc, loss_acc, random_action_ratio, i_episode)
+            loss_acc.clear()
+            reward_acc.clear()
+            state = get_random_state(3, my_engine, None)
 
-            episode.append((g_bef, a_bef, reward, g_aft, a_aft, v_aft))
-            if random.random() <= random_action_ratio:
-                a_aft = random.choice(ACTIONS)
-            g_aft_aft = get_next_game(g_aft, a_aft)
+        if len(replay_queue.queue) < REPLAY_QUEUE_SIZE / 10:
+            continue
 
-            g_aft, g_bef = g_aft_aft, g_aft
-            reward = immediate_reward(a_aft, g_bef, g_aft)
-            a_bef = a_aft
-            reward_total += reward
-            n_tick += 1
+        samples = random.sample(replay_queue.queue, min(len(replay_queue.queue), BATCH_SIZE))
 
-            if should_render:
-                render = get_render_func(g_aft_aft)
+        match method:
+            case 'SARSA':
+                sa_bef, r, sa_aft = zip(*samples)
+                q_func.eval()
+                with torch.no_grad():
+                    targets = torch.tensor(r)
+                    active_idxs = [i for i, v in enumerate(sa_aft) if v is not None]
+                    targets[active_idxs] += discount * q_func(torch.stack([sa_aft[i] for i in active_idxs]))[:, 0]
+                q_func.train()
+            case 'Q-learning':
+                sa_bef, r, s_aft, done = zip(*samples)
+                q_func.eval()
+                with torch.no_grad():
+                    targets = torch.tensor(r)
 
-        gs_bef, as_bef, rs, gs_aft, as_aft, vs_aft = list(zip(*episode))
-
-        # Monte Carlo target
-        arr_rwrd = np.array(rs + (0,) * (len(rs) - 1))
-        window_size = len(rs)
-        xs = np.lib.stride_tricks.as_strided(
-            arr_rwrd,
-            (arr_rwrd.size - window_size + 1, window_size), [arr_rwrd.strides[0], arr_rwrd.strides[0]]
-        )
-        # sum(rs[i] * discount ** i for i in np.nonzero(rs)[0])
-        targs = (xs * (discount ** np.arange(len(rs)))).sum(axis=1)
-        targs_mc = torch.tensor(targs)
-        # Monte Carlo target done
-
-        # Q learning target
-        with torch.no_grad():
-            targs_td = discount * torch.stack(vs_aft).flatten() + torch.tensor(rs)
-        # Q learning target done
+                    done = torch.tensor(done)
+                    size_sa = len(sa_bef[0])
+                    n_not_done = sum(~done)
+                    sa_aft = torch.empty((n_not_done, len(ACTIONS), size_sa))
+                    sa_aft[:, :, :-len(ACTIONS)] = torch.stack(s_aft)[~done, None, :]
+                    sa_aft[:, :, -len(ACTIONS):] = torch.stack([action2tensor(a) for a in ACTIONS])[None, :, :]
+                    vs = torch.max(
+                        q_func(sa_aft.reshape(-1, size_sa)).reshape(n_not_done, -1),
+                        dim=1,
+                    )
+                    targets[~done] += discount * vs.values
+                q_func.train()
 
         optim_full.zero_grad()
-        vs = state2value(torch.stack([game2tensor(g, a) for g, a in zip(gs_bef, as_bef)]))
-        loss = criterion(vs, .5 * (targs_mc + targs_td))
+        loss = torch.nn.functional.mse_loss(
+            q_func(torch.stack(sa_bef))[:, 0],
+            targets,
+        )
         loss.backward()
         optim_full.step()
-    # state = game2tensor(game)
-    # feat = feature_extractor(torch.stack((state, state)))
+        loss_acc.add(float(loss))
+
+        if i_step % 1000 == 0:
+            print("Saving checkpoints ...")
+            torch.save(q_func.state_dict(), f"runs/{N_QUEUE}/mlp_full.pt")
+            torch.save(optim_full.state_dict(),         f"runs/{N_QUEUE}/optim_full.pt")
+            with pathlib.Path(f"runs/{N_QUEUE}/progress.txt").open('w') as fp:
+                fp.write(json.dumps({
+                    "i_step": i_step,
+                    "i_episode": i_episode,
+                }))
+
+
+def report(g: tetris.BaseGame, r: Accumulator, l: Accumulator, rar: float, i: int):
+    print            ('Episode/NumberOfLineClear',     g.scorer.line_clears, i)
+    LOGGER.add_scalar('Episode/NumberOfLineClear',     g.scorer.line_clears, i)
+    LOGGER.add_scalar('Episode/LossAverage',           l.average,            i)
+    LOGGER.add_scalar('Episode/LossMax',               l.max,                i)
+    LOGGER.add_scalar('Episode/LossMin',               l.min,                i)
+    LOGGER.add_scalar('Episode/NumberOfTicks',         r.n,                  i)
+    LOGGER.add_scalar('Episode/RewardAverage',         r.average,            i)
+    LOGGER.add_scalar('Episode/RewardTotal',           r.sum,                i)
+    LOGGER.add_scalar('Episode/RandomActionRatio',     rar,                  i)
+    LOGGER.add_scalar('Episode/NumberOfTicks',  number_of_blocks_dropped(g), i)
 
 
 if __name__ == '__main__':
