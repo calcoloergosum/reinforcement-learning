@@ -13,14 +13,14 @@ if TYPE_CHECKING:
 SECOND: Final[int] = 1_000_000_000  # in nanoseconds
 
 
-class NESGravity(Gravity):
+class ManualGravity(Gravity):
     """NES gravity without lock delay, typically played without hard drops.
 
     Notes
     -----
     See <https://tetris.wiki/Tetris_(NES,_Nintendo)>.
     """
-    rule_overrides = {"can_hard_drop": False}
+    rule_overrides = {"can_hard_drop": True}
     FRAMES_PER_SEC = 60.0988
 
     def __init__(self, game: BaseGame, time_step = 0):
@@ -30,30 +30,11 @@ class NESGravity(Gravity):
         self.now = time_step
 
     def tick(self):
+        """pass time"""
         self.now += 1 / self.FRAMES_PER_SEC
 
     def calculate(self, delta: Optional[MoveDelta] = None) -> None:  # noqa: D102
-        level = self.game.level
         piece = self.game.piece
-
-        # NES runs at 60.0988 fps
-        NES_GRAV_FRAMES = {
-            29: 1,
-            19: 2,
-            16: 3,
-            13: 4,
-            10: 5,
-            9: 6,
-            8: 8,
-            7: 13,
-            6: 18,
-            5: 23,
-            4: 28,
-            3: 33,
-            2: 38,
-            1: 43,
-            0: 48,
-        }
 
         # for i in NES_GRAV_FRAMES:  # set gravity based on level
         #     if level >= i:

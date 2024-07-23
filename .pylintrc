@@ -25,7 +25,7 @@ clear-cache-post-run=no
 # A comma-separated list of package or module names from where C extensions may
 # be loaded. Extensions are loading into the active Python interpreter and may
 # run arbitrary code.
-extension-pkg-allow-list=
+extension-pkg-allow-list=cv2,
 
 # A comma-separated list of package or module names from where C extensions may
 # be loaded. Extensions are loading into the active Python interpreter and may
@@ -59,10 +59,11 @@ ignore-paths=
 # Emacs file locks
 ignore-patterns=^\.#
 
-# List of module names for which member attributes should not be checked
-# (useful for modules/projects where namespaces are manipulated during runtime
-# and thus existing member attributes cannot be deduced by static analysis). It
-# supports qualified module names, as well as Unix pattern matching.
+# List of module names for which member attributes should not be checked and
+# will not be imported (useful for modules/projects where namespaces are
+# manipulated during runtime and thus existing member attributes cannot be
+# deduced by static analysis). It supports qualified module names, as well as
+# Unix pattern matching.
 ignored-modules=
 
 # Python code to execute, usually for sys.path manipulation such as
@@ -86,9 +87,13 @@ load-plugins=
 # Pickle collected data for later comparisons.
 persistent=yes
 
+# Resolve imports to .pyi stubs if available. May reduce no-member messages and
+# increase not-an-iterable messages.
+prefer-stubs=no
+
 # Minimum Python version to use for version dependent checks. Will default to
 # the version used to run pylint.
-py-version=3.10
+py-version=3.12
 
 # Discover python modules and packages in the file system subtree.
 recursive=no
@@ -285,10 +290,10 @@ exclude-too-few-public-methods=
 ignored-parents=
 
 # Maximum number of arguments for function / method.
-max-args=5
+max-args=15
 
 # Maximum number of attributes for a class (see R0902).
-max-attributes=7
+max-attributes=15
 
 # Maximum number of boolean expressions in an if statement (see R0916).
 max-bool-expr=5
@@ -297,7 +302,7 @@ max-bool-expr=5
 max-branches=12
 
 # Maximum number of locals for function / method body.
-max-locals=15
+max-locals=30
 
 # Maximum number of parents for a class (see R0901).
 max-parents=7
@@ -431,11 +436,14 @@ disable=raw-checker-failed,
         use-symbolic-message-instead,
         use-implicit-booleaness-not-comparison-to-string,
         use-implicit-booleaness-not-comparison-to-zero,
-        missing-class-docstring,
+        useless-return,
+        duplicate-code,
+        redefined-builtin,
         missing-function-docstring,
-        wildcard-import,
-        unused-wildcard-import
-
+        missing-class-docstring,
+        missing-module-docstring,
+        too-many-statements,
+        too-many-return-statements,
 
 # Enable the message, report, category or checker with the given id(s). You can
 # either give multiple identifier separated by comma (,) or put this option
@@ -472,6 +480,11 @@ max-nested-blocks=5
 # it will be considered as an explicit return statement and no message will be
 # printed.
 never-returning-functions=sys.exit,argparse.parse_error
+
+# Let 'consider-using-join' be raised when the separator to join on would be
+# non-empty (resulting in expected fixes of the type: ``"- " + " -
+# ".join(items)``)
+suggest-join-with-non-empty-separator=yes
 
 
 [REPORTS]

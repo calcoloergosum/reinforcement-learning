@@ -1,11 +1,10 @@
 from array import array
-import tetris
-
-import numpy as np
-import cv2
-
 from typing import Literal
 
+import cv2
+import numpy as np
+import tetris
+import torch
 
 CV2_WINDOW_NAME = 'tetris'
 
@@ -26,17 +25,20 @@ COLORMAP = [
 
 N_QUEUE = 3
 
-BOARD_HEIGHT = 5
+BOARD_HEIGHT = 20
 BOARD_WIDTH = 10
 
 
-def get_render_func(game: tetris.BaseGame):
-    BG_COLOR = 80
-    SCALE_FIELD = 80
-    SCALE_QUEUE = 40
-    BUFFER = 50
-    MARGIN = 50
+def piece2tensor(p) -> torch.Tensor:
+    return torch.nn.functional.one_hot(torch.tensor(p.value) - 1, num_classes=7)
 
+
+BG_COLOR = 80
+SCALE_FIELD = 80
+SCALE_QUEUE = 40
+BUFFER = 50
+MARGIN = 50
+def get_render_func(game: tetris.BaseGame):
     # Prepare canvas
     h, w = game.playfield.shape
     h += 3
@@ -44,7 +46,9 @@ def get_render_func(game: tetris.BaseGame):
     w_queue_cell = 4
     board = np.zeros((h, w, 3), dtype=np.uint8)
     board_queue = np.zeros((N_QUEUE * (h_queue_cell + 1), w_queue_cell, 3), dtype=np.uint8)
-    canvas = BG_COLOR * np.ones((h * SCALE_FIELD + MARGIN, w * SCALE_FIELD + w_queue_cell * SCALE_QUEUE + BUFFER + 2 * MARGIN, 3), dtype=np.uint8)
+    canvas = BG_COLOR * np.ones((h * SCALE_FIELD + MARGIN,
+                                 w * SCALE_FIELD + w_queue_cell * SCALE_QUEUE + BUFFER + 2 * MARGIN,
+                                 3), dtype=np.uint8)
     # Prepare canvas done
 
     def render():
@@ -67,10 +71,23 @@ def get_render_func(game: tetris.BaseGame):
         # queue done
 
         # Draw to canvas
-        playfield = cv2.resize(board, (w * SCALE_FIELD, h * SCALE_FIELD), interpolation=cv2.INTER_NEAREST)
-        queue     = cv2.resize(board_queue, (w_queue_cell * SCALE_QUEUE, N_QUEUE * (h_queue_cell + 1) * SCALE_QUEUE), interpolation=cv2.INTER_NEAREST)
+        playfield = cv2.resize(board,
+                               (
+                                   w * SCALE_FIELD,
+                                   h * SCALE_FIELD
+                               ),
+                               interpolation=cv2.INTER_NEAREST)
+        queue     = cv2.resize(board_queue,
+                               (
+                                    w_queue_cell * SCALE_QUEUE,
+                                    N_QUEUE * (h_queue_cell + 1) * SCALE_QUEUE
+                               ),
+                               interpolation=cv2.INTER_NEAREST)
         canvas[:playfield.shape[0], MARGIN: MARGIN + playfield.shape[1]] = playfield
-        canvas[MARGIN: MARGIN + queue.shape[0], MARGIN + playfield.shape[1] + BUFFER: MARGIN + playfield.shape[1] + BUFFER + queue.shape[1],] = queue
+        canvas[MARGIN:
+               MARGIN + queue.shape[0],
+               MARGIN + playfield.shape[1] + BUFFER:
+               MARGIN + playfield.shape[1] + BUFFER + queue.shape[1],] = queue
         cv2.imshow(CV2_WINDOW_NAME, canvas)
         # Draw to canvas done
 
@@ -118,7 +135,7 @@ def copy_game(g: tetris.BaseGame, engine):
     is_engine_auto = engine is None
     _g = tetris.BaseGame(tetris.impl.presets.Modern if is_engine_auto else engine,
                          board=g.board.copy(), board_size=(BOARD_HEIGHT, BOARD_WIDTH))
-    _g.queue._pieces = g.queue._pieces.copy()
+    _g.queue._pieces = g.queue._pieces.copy()  # pylint: disable=protected-access
     _g.scorer.goal = g.scorer.goal
     _g.scorer.level = g.scorer.level
     _g.scorer.score = g.scorer.score
@@ -133,21 +150,21 @@ def copy_game(g: tetris.BaseGame, engine):
         r=g.piece.r,
         minos=g.piece.minos,
     )
-    # _g.board._data = g.board._data
-    # print(_g.playfield)
     return _g
 
 
+# Constant: Interface
+KEY_A = ord('a')
+KEY_D = ord('d')
+KEY_S = ord('s')
+KEY_W = ord('w')
+KEY_SPACE = 32
+
+
 def select_action(game: tetris.BaseGame) -> Action | Literal['unknown']:
-    # Constant: Interface
-    KEY_A = ord('a')
-    KEY_D = ord('d')
-    KEY_S = ord('s')
-    KEY_W = ord('w')
-    KEY_SPACE = 32
     # cv2.namedWindow(CV2_WINDOW_NAME, cv2.WINDOW_NORMAL)
 
-    key = get_render_func(game)()(30)
+    key = get_render_func(game)()()
     if key == -1:
         return 'wait'
     if key == KEY_SPACE:
@@ -165,14 +182,17 @@ def select_action(game: tetris.BaseGame) -> Action | Literal['unknown']:
 
 
 def get_random_state(buff: int, engine, seed: int | None = None) -> tetris.BaseGame:
-    q = [1,2,3,4,5,6,7] * 100
+    q = [6] * 500
     game = tetris.BaseGame(
         tetris.impl.presets.Modern if engine is None else engine,
         board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=seed, queue=q)
+    # game = tetris.BaseGame(
+    #     tetris.impl.presets.Modern if engine is None else engine,
+    #     board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=seed)
 
     b = np.array(game.board.data).reshape(BOARD_HEIGHT * 2, BOARD_WIDTH)
     _b = np.round(np.random.random((b.shape[0] // 2 - buff, b.shape[1])))
     _b[(_b > 0).all(axis=1)] = 0
     b[BOARD_HEIGHT + buff:] = np.round(_b)
-    game.board._data = array('B', b.flatten())
+    game.board._data = array('B', b.flatten())  # pylint: disable=protected-access
     return game
