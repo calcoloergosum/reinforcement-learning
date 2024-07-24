@@ -182,7 +182,8 @@ def select_action(game: tetris.BaseGame) -> Action | Literal['unknown']:
 
 
 def get_random_state(buff: int, engine, seed: int | None = None) -> tetris.BaseGame:
-    q = [6] * 500
+    # q = [4] * 500  # O only
+    q = [6] * 500  # T only
     game = tetris.BaseGame(
         tetris.impl.presets.Modern if engine is None else engine,
         board_size=(BOARD_HEIGHT, BOARD_WIDTH), seed=seed, queue=q)

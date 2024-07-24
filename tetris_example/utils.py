@@ -67,16 +67,20 @@ class IndexedPriorityQueue(Generic[T]):
 
     def push(self, priority: float, item: T):
         x = [priority, self.n_push, item]
+        self.i_push2item[self.n_push] = x
         if self.size() < self.maxlen:
             heapq.heappush(self.heap, x)
             self.on_pushpop(self.n_push, None)
+        elif self.size() > self.maxlen:
+            raise RuntimeError("Should not reach here. " +
+                               "Injecting item arbitrarily can lead to unexpected bahavior")
         else:
+            self.i_push2item.keys()
             priority, i_push, item = heapq.heappushpop(self.heap, x)
             del self.i_push2item[i_push]
             assert self.size() == len(self.i_push2item)
             self.on_pushpop(self.n_push, i_push)
 
-        self.i_push2item[self.n_push] = x
         self.n_push += 1
         return x
 
@@ -88,51 +92,64 @@ class IndexedPriorityQueue(Generic[T]):
 
 
 class DiscountedUCB:
-    def __init__(self, maxlen: int, discount: float) -> None:
+    def __init__(self, maxlen: int, interval_constant: float, discount: float) -> None:
         assert 0 <= discount <= 1
+        self.interval_constant = interval_constant
         self.i2sum = np.zeros(maxlen)
         self.i2n = np.zeros(maxlen)
         self.discount = discount
-        self.i_sum = 0
+        self.n_arms = 0
+
+        # for logging
+        self.i2n_raw = np.zeros(maxlen)
 
     def add_arm(self) -> int:
-        self.i_sum += 1
-        return self.i_sum - 1
+        self.n_arms += 1
+        return self.n_arms - 1
 
     def weights(self) -> np.ndarray:
-        is_zero = np.asarray(self.i2n[:self.i_sum] == 0)
-        i2sum = self.i2sum[:self.i_sum] + 1e5 * is_zero
-        i2n = self.i2n[:self.i_sum] + is_zero
+        is_zero = np.asarray(self.i2n[:self.n_arms] == 0)
+        i2sum = self.i2sum[:self.n_arms] + 1e5 * is_zero
+        i2n = self.i2n[:self.n_arms] + is_zero
         avg = i2sum / i2n
 
-        cb = np.sqrt((avg * (1 - avg)).clip(0.002) * i2n.sum() / i2n)
+        if self.interval_constant == 0:
+            return avg
+        cb = self.interval_constant * (np.sqrt(2 * i2n.sum() / i2n) - np.sqrt(2))
         return avg + cb
 
     def sample_random(self, k: int):
-        if k == self.i_sum:
-            return list(range(self.i_sum))
-        return weighted_sample_without_replacement(range(self.i_sum), self.weights(), k)
+        if k == self.n_arms:
+            return list(range(self.n_arms))
+        weights = self.weights()
+        weights = weights / weights.sum()
+        weights[weights <= 0] = 1e-7
+        return weighted_sample_without_replacement(range(self.n_arms), weights, k)
 
     def set(self, i: int, sum: float, n: int) -> None:
-        assert i < self.i_sum
+        assert i < self.n_arms
         self.i2sum[i] = sum
         self.i2n[i] = n
+        # for logging
+        self.i2n_raw[i] = n
 
     def update(self, i: int, reward: float) -> None:
-        assert i < self.i_sum
-        self.i2sum[:self.i_sum] *= self.discount
-        self.i2sum[i] += reward
-
-        self.i2n *= self.discount
-        self.i2n[i] += 1
+        assert i < self.n_arms
+        self.i2sum[:self.n_arms] *= self.discount
+        self.i2n  [:self.n_arms] *= self.discount
+        self.i2sum[i] += reward * (1 - self.discount)
+        self.i2n  [i] +=          (1 - self.discount)
+        # for logging
+        self.i2n_raw[i] += 1
 
     def update_many(self, idxs: np.ndarray, rewards: np.ndarray) -> None:
-        assert (idxs < self.i_sum).all()
-        self.i2sum[:self.i_sum] *= self.discount
-        self.i2sum[idxs] += rewards
-
-        self.i2n[:self.i_sum] *= self.discount
-        self.i2n[idxs] += 1
+        assert (idxs < self.n_arms).all()
+        self.i2sum[:self.n_arms] *= self.discount
+        self.i2n  [:self.n_arms] *= self.discount
+        self.i2sum[idxs] += rewards * (1 - self.discount)
+        self.i2n  [idxs] +=           (1 - self.discount)
+        # for logging
+        self.i2n_raw[idxs] += 1
 
 
 class PrioritizedSAR:
@@ -143,15 +160,22 @@ class PrioritizedSAR:
     Also, replay samples are selected by discounted UCB (D-UCB; Kocsis and Szepesva ́ri 2006)
     """
     def __init__(self, maxlen: int, batch_size: int, sa2t, s2t,
-                 per_power: float = 0.2,
+                 per_power: float = 0.5,
                  per_discount: float = 0.8,
-                 per_propagate_backwards: float = 0.9,
-                 per_propagate_limit: int = 40,
-                 seed: int = 0) -> None:
+                 per_propagate_backwards: float = 0.7,
+                 per_propagate_limit: int = 30,
+                 ducb_interval_constant: float = 0,
+                 ducb_discount: float = 0.1,  # discount per queue replacement
+                 seed: int = 0,
+        ) -> None:
         self.batch_size = batch_size
 
         # D-UCB
-        self.ucb = DiscountedUCB(maxlen, discount=0.1 ** (batch_size / maxlen))
+        self.ucb = DiscountedUCB(maxlen,
+                                 interval_constant=ducb_interval_constant,
+                                 # discount per update
+                                 discount=ducb_discount ** (batch_size / maxlen)
+        )
         self.i_pq2i_ucb = {}
         self.i_ucb2i_pq = []
 
@@ -164,11 +188,15 @@ class PrioritizedSAR:
                 self.i_ucb2i_pq.append(i_push)
                 self.i_pq2i_ucb[i_push] = i_ucb
                 return
-            assert len(self.ucb.i_sum) == maxlen
+            assert self.ucb.n_arms == maxlen
+            # replace arm info
             i_ucb = self.i_pq2i_ucb[i_pop]
             self.i_pq2i_ucb[i_push] = i_ucb
             del self.i_pq2i_ucb[i_pop]
             self.i_ucb2i_pq[i_ucb] = i_pop
+            # replace arm info done
+
+            # reset arm
             self.ucb.set(i_ucb, 0, 0)
 
         self.ipq = IndexedPriorityQueue(maxlen, on_pushpop=on_pushpop)
@@ -208,41 +236,130 @@ class PrioritizedSAR:
 
     def sample(self):
         batch_size = min(self.size(), self.batch_size)
-        idxs_ucb = self.ucb.sample_random(batch_size)
-        idxs_pq = np.asarray([self.i_ucb2i_pq[i_ucb] for i_ucb in idxs_ucb])
 
-        def update(priorities: np.ndarray) -> None:
-            """Update into discounted average"""
-            # Update loss info
-            self.ucb.update_many(np.asarray(idxs_ucb), priorities)
+        # d-ucb sampling
+        # idxs_ucb = self.ucb.sample_random(batch_size)
+        # idxs_pq = np.asarray([self.i_ucb2i_pq[i_ucb] for i_ucb in idxs_ucb])
 
-            # propagate backwards
-            # Propagate 10% most surprising samples backwards in time
-            # And overwrite reward score
-            idxs_topk = np.argpartition(priorities, -len(idxs_pq) // 10)[-len(idxs_pq) // 10:]
-            for i_pq in idxs_pq[idxs_topk]:
-                rsum = self.ucb.i2sum[self.i_pq2i_ucb[i_pq]]
-                item = self.ipq.i_push2item[i_pq]
-                for _ in range(self.per_propagate_limit):
-                    # get parent
-                    item = self.ipq.heap[i_pq][-1][-1]
-                    if item is None:
-                        break
-                    i_pq = item[1]
-                    # get parent done
+        # def update(priorities: np.ndarray) -> None:
+        #     """Update into discounted average"""
+        #     # Update loss info
+        #     self.ucb.update_many(np.asarray(idxs_ucb), priorities)
 
-                    rsum *= self.per_propagate_backwards
-                    rsum_ = self.ucb.i2sum[self.i_pq2i_ucb[i_pq]]
-                    self.ucb.i2sum[self.i_pq2i_ucb[i_pq]] = max(rsum_, rsum)
-            # propagate backwards done
+        #     # propagate backwards
+        #     # Propagate 10% most surprising samples backwards in time
+        #     # And overwrite reward score
+        #     idxs_topk = np.argpartition(priorities, -len(idxs_pq) // 10)[-len(idxs_pq) // 10:]
+        #     for i_pq in idxs_pq[idxs_topk]:
+        #         rsum = self.ucb.i2sum[self.i_pq2i_ucb[i_pq]]
+        #         item = self.ipq.i_push2item[i_pq]
+        #         for _ in range(self.per_propagate_limit):
+        #             # get parent
+        #             item = self.ipq.heap[i_pq][-1][-1]
+        #             if item is None:
+        #                 break
+        #             i_pq = item[1]
+        #             # get parent done
 
+        #             rsum *= self.per_propagate_backwards
+        #             rsum_ = self.ucb.i2sum[self.i_pq2i_ucb[i_pq]]
+        #             self.ucb.i2sum[self.i_pq2i_ucb[i_pq]] = max(rsum_, rsum)
+        #     # propagate backwards done
+
+        #     # heapify again
+        #     weights = self.ucb.weights()
+        #     for i_ucb, w in enumerate(weights):
+        #         self.ipq.i_push2item[self.i_ucb2i_pq[i_ucb]][0] = w
+        #     self.ipq.update()
+
+        #     return
+        # d-ucb sampling done
+
+        # uniform sampling
+        # idxs_pq = random.sample(range(len(self.ipq.heap)), batch_size)
+        # def update(priorities):
+        #     for i_pq, v in zip(idxs_pq, priorities):
+        #         self.ipq.heap[i_pq][0] = v
+        #     self.ipq.update()
+        # uniform sampling done
+
+        # simple weighted sampling
+        weights = np.asarray([x ** .5 for x, *_ in self.ipq.heap])
+        weights /= weights.sum()
+        weights[weights <= 0] = 1e-7
+        idxs_pq = weighted_sample_without_replacement(range(self.ipq.size()), weights, batch_size)
+        def update(priorities):
             # heapify again
-            weights = self.ucb.weights()
-            for i_ucb, w in enumerate(weights):
-                self.ipq.i_push2item[self.i_ucb2i_pq[i_ucb]][0] = w
+            for i_pq, v in zip(idxs_pq, priorities):
+                self.ipq.heap[i_pq][0] = v ** self.per_power
             self.ipq.update()
+        # simple weighted sampling done
 
-            return
+        # backward propatating weighted sampling
+        # weights = np.asarray([x ** .5 for x, *_ in self.ipq.heap])
+        # weights /= weights.sum()
+        # weights[weights <= 0] = 1e-7
+        # idxs_pq = np.asarray(weighted_sample_without_replacement(range(self.ipq.size()), weights, batch_size))
+        # def update(priorities):
+        #     # Overwrite reward score first
+        #     for i_pq, v in zip(idxs_pq, priorities):
+        #         self.ipq.heap[i_pq][0] = v ** self.per_power
+
+        #     # propagate backwards
+        #     # Propagate 10% most surprising samples backwards in time
+        #     # And overwrite reward score
+        #     idxs_topk = np.argpartition(priorities, -len(idxs_pq) // 10)[-len(idxs_pq) // 10:]
+        #     for i_pq, v in zip(idxs_pq[idxs_topk], priorities[idxs_topk]):
+        #         item = self.ipq.heap[i_pq]
+        #         v = v ** self.per_power
+        #         for _ in range(self.per_propagate_limit):
+        #             item[0] = max(item[0], v)
+
+        #             # get parent
+        #             item = item[-1][-1]
+        #             if item is None:
+        #                 break
+
+        #             v *= self.per_propagate_backwards
+        #             # get parent done
+        #     # propagate backwards done
+
+        #     # heapify again
+        #     self.ipq.update()
+        # backward propatating weighted sampling done
+
+        # backward propatating weighted sampling
+        # weights = np.asarray([x for x, *_ in self.ipq.heap])
+        # weights /= weights.sum()
+        # weights[weights <= 0] = 1e-7
+        # idxs_pq = np.asarray(weighted_sample_without_replacement(range(self.ipq.size()), weights, batch_size))
+        # def update(priorities):
+        #     # Overwrite reward score first
+        #     vs = priorities ** self.per_power
+        #     for i_pq, v in zip(idxs_pq, vs):
+        #         self.ipq.heap[i_pq][0] = v
+
+        #     # propagate backwards
+        #     # Propagate 10% most surprising samples backwards in time
+        #     # And overwrite reward score
+        #     idxs_topk = np.argpartition(vs, -len(idxs_pq) // 10)[-len(idxs_pq) // 10:]
+        #     for i_pq, v in zip(idxs_pq[idxs_topk], vs[idxs_topk]):
+        #         item = self.ipq.heap[i_pq]
+        #         for _ in range(self.per_propagate_limit):
+        #             item[0] = max(item[0], v)
+
+        #             # get parent
+        #             item = item[-1][-1]
+        #             if item is None:
+        #                 break
+
+        #             v *= self.per_propagate_backwards
+        #             # get parent done
+        #     # propagate backwards done
+
+        #     # heapify again
+        #     self.ipq.update()
+        # backward propatating weighted sampling done
 
         return [self.ipq.heap[i][2][:-1] for i in idxs_pq], update
 

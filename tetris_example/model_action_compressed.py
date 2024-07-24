@@ -240,8 +240,8 @@ def get_q_function(root: pathlib.Path) -> torch.nn.Module:
     net = torchvision.ops.MLP(
         board.BOARD_WIDTH * (board.BOARD_HEIGHT + TetrisNet.ROI_HEIGHT - 1) +
         board.N_QUEUE * 7 + ACTION_SIZE,
-        [1024, 1024, 64, 1],
-        # [256, 256, 32, 1],
+        # [1024, 1024, 64, 1],
+        [1024, 1024, 256, 256, 32, 1],
     )
     if (net_path := root / "mlp_full.pt").exists():
         net.load_state_dict(torch.load(net_path))
@@ -324,7 +324,7 @@ def get_random_action_ratio(v_initial, v_final, n_current, n_final):
 ROOT = pathlib.Path(f"runs/{board.N_QUEUE}_comp_act")
 ROOT.mkdir(exist_ok=True)
 #     schedule
-REPLAY_QUEUE_SIZE = 30_000
+REPLAY_QUEUE_SIZE = 300_000
 LR = 0.01
 N_STEP = 1_000_000
 BATCH_SIZE = 512
@@ -332,8 +332,8 @@ BATCH_SIZE = 512
 EMPTY_HEIGHT = board.BOARD_HEIGHT // 2
 METHOD = 'Q-learning-PER'
 DISCOUNT = 0.95
-RANDOM_ACTION_INITIAL_VALUE = 1e-1
-RANDOM_ACTION_FINAL_VALUE   = 1e-2
+RANDOM_ACTION_INITIAL_VALUE = 5e-2
+RANDOM_ACTION_FINAL_VALUE   = 5e-2
 RANDOM_ACTION_FINAL_STEP    = 2_000
 #     logging
 LOGGER = torch.utils.tensorboard.SummaryWriter(ROOT)
@@ -394,7 +394,7 @@ def main():
                                                       RANDOM_ACTION_FINAL_VALUE,
                                                       i_episode,
                                                       RANDOM_ACTION_FINAL_STEP)
-        if random.random() <= random_action_ratio:
+        if replay_queue.size() < REPLAY_QUEUE_SIZE / 10 or random.random() <= random_action_ratio:
             action = random.choice(actions)
         else:
             q_func.eval()
@@ -435,7 +435,8 @@ def main():
 
         # logging
         if i_step % 1000 == 0:
-            print(np.array([x[0] for x in replay_queue.ipq.heap]))
+            print("Score Samples", np.array([x[0] for x in replay_queue.ipq.heap[:1000]]))
+            print("(UCB) Arm visit Samples", np.array(replay_queue.ucb.i2n_raw[:1000]))
             print("Saving checkpoints ...")
             torch.save(q_func.state_dict(), ROOT / "mlp_full.pt")
             torch.save(optim.state_dict(), ROOT / "optim_full.pt")
@@ -502,7 +503,7 @@ def learn(method, samples, q_func, optim, discount):
     loss_mean.backward()
     # torch.nn.utils.clip_grad_norm_(q_func.parameters(), 10)
     optim.step()
-    return loss.detach().numpy(), float(loss_mean())
+    return loss.detach().numpy(), float(loss_mean)
 
 
 def report(logger: torch.utils.tensorboard.SummaryWriter,
@@ -513,7 +514,6 @@ def report(logger: torch.utils.tensorboard.SummaryWriter,
            q,
            i: int,                # episode index
 ) -> None:
-    logger.add_histogram('ReplayQueue/Scores', np.array([x for x, *_ in q.ipq.heap if x < 1e4]),  i)
     logger.add_scalar('Episode/NumberOfLineClear',     g.scorer.line_clears, i)
     logger.add_scalar('Episode/LossAverage',           l.average,            i)
     logger.add_scalar('Episode/LossMax',               l.max,                i)
@@ -523,6 +523,11 @@ def report(logger: torch.utils.tensorboard.SummaryWriter,
     logger.add_scalar('Episode/RewardTotal',           r.sum,                i)
     logger.add_scalar('Episode/RandomActionRatio',     rar,                  i)
     logger.add_scalar('Episode/NumberOfTicks',  board.number_of_blocks_dropped(g), i)
+
+    # histogram report
+    priorities = np.array([x for x, *_ in q.ipq.heap if x < 1e4])
+    if len(priorities > 0):
+        logger.add_histogram('ReplayQueue/Scores', priorities,  i)
 
 
 if __name__ == '__main__':
