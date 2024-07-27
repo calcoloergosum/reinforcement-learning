@@ -144,46 +144,6 @@ def state2tensor(g: tetris.BaseGame) -> torch.Tensor:
     return vec
 
 
-def column2height(c):
-    is_any_nonzero, h = max(zip(c != 0, itertools.count()))
-    return (h + 1) if is_any_nonzero else 0
-
-
-def game2feature_heuristic(g: tetris.BaseGame):
-    """Heuristic measures useful at the beginning of the learning"""
-    b = np.array(g.board[board.BOARD_HEIGHT:])
-    columns = b.T[:, ::-1]
-    column_heights = [column2height(col) for col in columns]
-
-    # Number of holes
-    n_hole = 0
-    for col, h in zip(columns, column_heights):
-        if h == 0:
-            continue
-        n_hole += sum(col[:h] == 0)
-    # Number of holes done
-
-    # Bumpyness
-    diff_total = sum(abs(h1 - h2)
-                     for h1, h2 in zip(column_heights, column_heights[1:]))
-    # diff_max = max(abs(h1 - h2) for h1, h2 in zip(column_heights, column_heights[1:]))
-    # Bumpyness done
-
-    # Height
-    max_height = max(column_heights)
-    # min_height = min(column_heights)
-    # Height done
-
-    return (
-        *scorer2feature_heuristic(g.scorer),
-        n_hole, diff_total, max_height,
-    )
-
-
-def scorer2feature_heuristic(s):
-    return (s.level, s.line_clears, s.back_to_back, s.combo)
-
-
 my_engine = EngineFactory(
     gravity=ManualGravity,
     queue=tetris.impl.queue.SevenBag,

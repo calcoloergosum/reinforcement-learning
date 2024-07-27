@@ -3,6 +3,7 @@ from typing import Literal
 
 import cv2
 import numpy as np
+import rust_tetris
 import tetris
 import torch
 
@@ -23,10 +24,11 @@ COLORMAP = [
 ]
 
 
-N_QUEUE = 3
+N_QUEUE = 5
 
 BOARD_HEIGHT = 20
 BOARD_WIDTH = 10
+BOARD_HEIGHT_ROI = 2
 
 
 def piece2tensor(p) -> torch.Tensor:
@@ -38,10 +40,20 @@ SCALE_FIELD = 80
 SCALE_QUEUE = 40
 BUFFER = 50
 MARGIN = 50
-def get_render_func(game: tetris.BaseGame):
+MINO2SHAPE = {
+    "I": [[1, 0], [1, 1], [1, 2], [1, 3]],
+    "J": [[0, 0], [1, 0], [1, 1], [1, 2]],
+    "L": [[0, 2], [1, 0], [1, 1], [1, 2]],
+    "O": [[0, 1], [0, 2], [1, 1], [1, 2]],
+    "S": [[0, 1], [0, 2], [1, 0], [1, 1]],
+    "T": [[0, 1], [1, 0], [1, 1], [1, 2]],
+    "Z": [[0, 0], [0, 1], [1, 1], [1, 2]],
+}
+
+
+def get_render_func(game: rust_tetris.Game):
     # Prepare canvas
-    h, w = game.playfield.shape
-    h += 3
+    h, w = 22, 10
     h_queue_cell = 2
     w_queue_cell = 4
     board = np.zeros((h, w, 3), dtype=np.uint8)
@@ -51,23 +63,27 @@ def get_render_func(game: tetris.BaseGame):
                                  3), dtype=np.uint8)
     # Prepare canvas done
 
+    field = np.empty((22, 10, 3), dtype=np.uint8)
     def render():
-        nonlocal canvas
+        nonlocal canvas, field
 
         # playfield
         board.fill(0)
-        arr = np.array(game.get_playfield(buffer_lines=3).data).reshape(h, w)
+        field_raw = np.array(game.playfield).reshape(h, w)
+        board[...] = field_raw[..., None]
+        field_raw[field_raw == 10] = game.piece[0]  # Override current block
         for i, v in enumerate(COLORMAP):
-            board[arr == i] = v
+            board[field_raw == i] = v
         # playfield done
 
         # queue
         board_queue.fill(BG_COLOR)
         for i, v in enumerate(game.queue[:N_QUEUE]):
-            v = game.queue[i]
+            vi = game.queue[i]
+            v = rust_tetris.piece_kind_int2str(vi)
             board_queue[i * (h_queue_cell + 1): (i + 1) * (h_queue_cell + 1) - 1] = 0
-            for x, y in game.rs.spawn(v).minos:
-                board_queue[i * (h_queue_cell + 1) + x, y] = COLORMAP[v.value]
+            for x, y in MINO2SHAPE[v]:
+                board_queue[i * (h_queue_cell + 1) + x, y] = COLORMAP[vi]
         # queue done
 
         # Draw to canvas
@@ -158,11 +174,13 @@ KEY_A = ord('a')
 KEY_D = ord('d')
 KEY_S = ord('s')
 KEY_W = ord('w')
+KEY_Z = ord('z')
+KEY_C = ord('c')
 KEY_SPACE = 32
 
 
 def select_action(game: tetris.BaseGame) -> Action | Literal['unknown']:
-    # cv2.namedWindow(CV2_WINDOW_NAME, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(CV2_WINDOW_NAME, cv2.WINDOW_NORMAL)
 
     key = get_render_func(game)()()
     if key == -1:
@@ -177,6 +195,10 @@ def select_action(game: tetris.BaseGame) -> Action | Literal['unknown']:
         return 'soft_drop'
     if key == KEY_W:
         return 'rotate'
+    if key == KEY_Z:
+        return 'go_back'
+    if key == KEY_C:
+        return 'swap'
     print(f"Unknown key {key}")
     return 'unknown'
 

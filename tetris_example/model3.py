@@ -4,7 +4,7 @@ import random
 from typing import List
 
 import numpy as np
-import tetris
+import rust_tetris
 import torch
 import torch.utils
 import torch.utils.tensorboard
@@ -271,7 +271,7 @@ def action2tensor(mino, a):
     )
 
 
-def state_action2tensor(g: tetris.BaseGame, a):
+def state_action2tensor(g: rust_tetris.BaseGame, a):
     b = torch.tensor(g.board[board.BOARD_HEIGHT - TetrisNet.ROI_HEIGHT + 1:].data)
     field = torch.tensor(g.get_playfield(buffer_lines=TetrisNet.ROI_HEIGHT - 1).data)
     field[field == 8] = 0  # Remove ghost
@@ -284,7 +284,7 @@ def state_action2tensor(g: tetris.BaseGame, a):
     return vec
 
 
-def state2tensor(g: tetris.BaseGame):
+def state2tensor(g: rust_tetris.BaseGame):
     b = torch.tensor(g.board[board.BOARD_HEIGHT - TetrisNet.ROI_HEIGHT + 1:].data)
     field = torch.tensor(g.get_playfield(buffer_lines=TetrisNet.ROI_HEIGHT - 1).data)
     field[field == 8] = 0  # Remove ghost
@@ -296,7 +296,7 @@ def state2tensor(g: tetris.BaseGame):
     return vec
 
 
-def get_next_game(g: tetris.BaseGame, a, engine):
+def get_next_game(g: rust_tetris.BaseGame, a, engine):
     _g = board.copy_game(g, engine)
     r, t = a
     if r != 0:
@@ -353,11 +353,11 @@ def main():
     q_func.train()
     optim = get_optimizer(ROOT, q_func.parameters(), LR)
 
-    my_engine = tetris.EngineFactory(
+    my_engine = rust_tetris.EngineFactory(
         gravity=ManualGravity,
-        queue=tetris.impl.queue.SevenBag,
-        rotation_system=tetris.impl.rotation.SRS,
-        scorer=tetris.impl.scorer.GuidelineScorer,
+        queue=rust_tetris.impl.queue.SevenBag,
+        rotation_system=rust_tetris.impl.rotation.SRS,
+        scorer=rust_tetris.impl.scorer.GuidelineScorer,
     )
 
     state = board.get_random_state(EMPTY_HEIGHT, my_engine, None)
@@ -507,7 +507,7 @@ def learn(method, samples, q_func, optim, discount):
 
 
 def report(logger: torch.utils.tensorboard.SummaryWriter,
-           g: tetris.BaseGame,
+           g: rust_tetris.BaseGame,
            r: utils.Accumulator,  # reward
            l: utils.Accumulator,  # loss
            rar: float,            # random action ratio
