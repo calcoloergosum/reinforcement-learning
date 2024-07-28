@@ -126,7 +126,24 @@ class UCTNode(Generic[T, A]):
     ) -> Tuple[Self, int]:
         for _ in tqdm.tqdm(range(num_reads)):
             leaf = root.select_leaf(play, turn)
-            child_priors, value_estimate = evaluate(leaf.inner)
-            leaf.expand(child_priors)
-            leaf.backup(value_estimate)
+            leaf.maybe_expand_and_backup(evaluate)
         return root, np.argmax(root.child_number_visits)
+
+    def safe_get_child(self, action,
+        evaluate: Callable[[T], float],
+        play: Callable[[T, A], T],
+        turn: Callable[[T], Literal[-1] | 0 | 1],
+    ) -> Self:
+        self.maybe_add_child(action, play, turn)
+        child = self.children.get(action)
+        child.maybe_expand_and_backup(evaluate)
+        return child
+
+    def maybe_expand_and_backup(
+        self,
+        evaluate: Callable[[T], float],
+    ):
+        if not self.is_expanded:
+            child_priors, value_estimate = evaluate(self.inner)
+            self.expand(child_priors)
+            self.backup(value_estimate)

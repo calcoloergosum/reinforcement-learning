@@ -2,10 +2,11 @@ import numpy as np
 import rust_tetris
 from typing import List
 import pathlib
-from .board import select_action as manual_policy
+from .board import select_action as manual_policy, get_render_func
 from .heuristic import board2score
 from .uct import get_policy as get_uct_policy
 import time
+import json
 
 
 def game2bool_field(game: rust_tetris.Game) -> np.ndarray:
@@ -38,8 +39,10 @@ def game2serialize(game: rust_tetris.Game) -> List[int]:
     arr[arr == 8] = 0  # Remove ghost
     arr[arr == 10] = -1  # Flip current piece
     piece = game.piece
-    queue_action = game.queue
-    return (*arr, *piece, *queue_action, game.score)
+    queue = game.queue
+    piece_onehot = [0 for _ in range(7)]
+    piece_onehot[piece[0] - 1] = 1
+    return (*arr.tolist(), *queue, piece[0], game.score)
 
 
 strategies = {
@@ -73,34 +76,74 @@ def game2score_heuristic(game: rust_tetris.Game) -> float:
 
 def main():
     """Play interactively"""
-    method = 'mcts'
-    # method = 'manual'
     strategy_name = 'mixed'
     # strategy_name = 'heuristic'
     # strategy_name = 'vanilla'
-    epsilon = 0.0
-
-    if method == 'mcts':
-        policy = get_uct_policy(**strategies[strategy_name], epsilon=epsilon)
-    elif method == 'manual':
-        policy = manual_policy
-    else:
-        raise KeyError(f"Unknown policy {method}")
+    # Epsilon greedy; Random movement ratio.
+    # With 5%, it seems to breeze through the randomness.
+    # With 10%, it seems to suffer too much.
+    epsilon = 0.07
+    policy = get_uct_policy(**strategies[strategy_name], epsilon=epsilon)
 
     game = rust_tetris.Game()
 
     # Sparse hole pattern
-    board = np.zeros((22, 10))
-    board[10:] = 1  # first 2 + 8 lines empty
-    n_hole_per_line = 4
-    board[
-        np.arange(0, 22)[:, None].repeat(n_hole_per_line, axis=1),
-        np.random.randint(0, 10, (22, n_hole_per_line)),
-    ] = 0
-    game.board = board.astype(int).tolist()
+    # board = np.zeros((22, 10))
+    # board[10:] = 1  # first 2 + 8 lines empty
+    # n_hole_per_line = 4
+    # board[
+    #     np.arange(0, 22)[:, None].repeat(n_hole_per_line, axis=1),
+    #     np.random.randint(0, 10, (22, n_hole_per_line)),
+    # ] = 0
+    # game.board = board.astype(int).tolist()
+
+    states = [game.copy()]
+    actions = []
+    while not game.is_game_over and len(states) < 200:
+        print(f"Move #{len(states):0>4}")
+        i_action, action_cluster = policy(game.copy())
+        for action in action_cluster:
+            if action == 'unknown':
+                game.soft_drop()
+                pass
+            elif action == 'hard_drop':
+                game.hard_drop()
+            elif action == 'left':
+                game.left()
+            elif action == 'right':
+                game.right()
+            elif action == 'soft_drop':
+                game.soft_drop()
+            elif action == 'rotate':
+                game.rotate_c()
+            elif action == 'swap':
+                game.swap()
+            else:
+                raise KeyError(action)
+            _ = get_render_func(game)()(1)
+        states.append(game.copy())
+        actions.append((game.piece[0], int(i_action)))
+    
+    logdir = pathlib.Path(f"logs/{strategy_name}_{epsilon}")
+    logdir.mkdir(exist_ok=True, parents=True)
+    (logdir / f"log_{int(time.time())}.json").write_text(
+        json.dumps({
+            "actions": actions,
+            "states": [game2serialize(state) for state in states],
+            "over": states[-1].is_game_over,
+        }),
+        encoding='utf8',
+    )
+
+
+def main_manual():
+    """Play interactively"""
+    policy = manual_policy
+
+    game = rust_tetris.Game()
 
     history = [game.copy()]
-    while not game.is_game_over and len(history) < 300:
+    while not game.is_game_over:
         action = policy(game.copy())
         if action == 'unknown':
             game.soft_drop()
@@ -129,11 +172,6 @@ def main():
             print(f"Unknown action {action}")
         history.append(game.copy())
 
-    logdir = pathlib.Path(f"logs/{method}_{strategy_name}_{epsilon}")
-    logdir.mkdir(exist_ok=True, parents=True)
-    with (logdir / f"log_{int(time.time())}.txt").open("w", encoding='utf8') as fp:
-        for g in history:
-            print(' '.join(map(str, game2serialize(g))), file=fp)
 
 if __name__ == '__main__':
     main()

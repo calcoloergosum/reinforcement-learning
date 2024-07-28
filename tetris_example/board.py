@@ -93,6 +93,12 @@ def get_render_func(game: rust_tetris.Game):
                                    h * SCALE_FIELD
                                ),
                                interpolation=cv2.INTER_NEAREST)
+        playfield[0::SCALE_FIELD, :] = 0
+        playfield[1::SCALE_FIELD, :] = 0
+        playfield[-1::-SCALE_FIELD, :] = 0
+        playfield[:, 0::SCALE_FIELD] = 0
+        playfield[:, 1::SCALE_FIELD] = 0
+        playfield[:, -1::-SCALE_FIELD] = 0
         queue     = cv2.resize(board_queue,
                                (
                                     w_queue_cell * SCALE_QUEUE,

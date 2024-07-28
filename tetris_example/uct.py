@@ -75,7 +75,7 @@ def report_statistics(root: UCTNode,
         print(f"depth: {i: >3} " +
               f"line_clears: {x.inner[1].line_clears: >3} " +
               f"score: {game2score(x.inner[1]): >8.3f} " +
-              f"visited: {n_visit} / {int(n_visit_all)} ({n_visit_ratio:.1%})")
+              f"visited: {n_visit: >5} / {int(n_visit_all): >5} ({n_visit_ratio:5.1%})")
         x = x.children.get(x.best_child())
 
 
@@ -153,45 +153,27 @@ def get_policy(n_search: int,
 
     evaluate = evaluate_uniform
     root = None
-    action_queued = []
 
-    def select_action_queued(game: rust_tetris.Game):
-        nonlocal root, action_queued
-        assert action_queued
-        action_queued, ret = action_queued[1:], action_queued[0]
-        _ = board.get_render_func(game)()(1)
-        return ret
-
-    def select_action(game):
-        nonlocal root, action_queued
-        if action_queued:
-            return select_action_queued(game)
+    def select_action_cluster(game: rust_tetris.Game) -> Tuple[int, List[str]]:
+        nonlocal root
 
         if root and root.turn == 0:
-            for i_action, root_new in root.children.items():
-                if game.queue[:board.N_QUEUE] == root_new.inner[1].queue[:board.N_QUEUE]:
-                    break
+            old_queue = root.inner[1].queue[1:]
+            new_queue = game.queue
+            i_action = old_queue[board.N_QUEUE - 1:].index(new_queue[board.N_QUEUE - 1])
+            if MODE == 'greedy' and i_action != 0:
+                root = None  # reset!
             else:
-                if MODE == 'greedy':
-                    pass
-                elif MODE == 'random':
-                    # print(game.queue[:board.N_QUEUE])
-                    # for i_action, root_new in root.children.items():
-                    #     print(root_new.inner[1].queue[:board.N_QUEUE])
-
-                    import code
-                    code.interact(local={**globals(), **locals()})
-                    # _ = board.get_render_func(root.inner[1])()()
-                    # _ = board.get_render_func(game)()()
-                    raise NotImplementedError("Should not be reachable")
-            # Replace old root with new root of chosen action,
-            # and update dummy
-            dummy = root.parent
-            dummy.child_total_value  [None] = root.child_total_value  [i_action]
-            dummy.child_number_visits[None] = root.child_number_visits[i_action]
-            root = root_new 
-            root.parent = dummy
-            root.move = None
+                root_new = root.safe_get_child(i_action, evaluate, play, turn)
+                evaluate(root.inner)
+                # Replace old root with new root of chosen action,
+                # and update dummy
+                dummy = root.parent
+                dummy.child_total_value  [None] = root.child_total_value  [i_action]
+                dummy.child_number_visits[None] = root.child_number_visits[i_action]
+                root = root_new 
+                root.parent = dummy
+                root.move = None
 
         # sanity check
         if root:
@@ -217,7 +199,7 @@ def get_policy(n_search: int,
         if epsilon > random.random():
             # Random action
             i_action, _ = random.choice(list(enumerate(actions)))
-            root, _ = UCTNode.uct_search(root or (False, game), 2, evaluate, play, turn)
+            root, _ = UCTNode.uct_search((False, game), 1, evaluate, play, turn)
         else:
             if root is None:
                 root, i_action = UCTNode.uct_search((False, game), n_search, evaluate, play, turn)
@@ -227,7 +209,7 @@ def get_policy(n_search: int,
 
         # Cache tree for later use
         assert root.turn == 1
-        root_new = root.children.get(i_action)
+        root_new = root.safe_get_child(i_action, evaluate, play, turn)
         # Replace old root with new root of chosen action,
         # and update dummy
         dummy = root.parent
@@ -252,11 +234,9 @@ def get_policy(n_search: int,
         n_bytes = humanfriendly.format_size(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
         print(f"Consumed {n_bytes} memory")
         # Report done
+        return i_action, ret
 
-        action_queued.extend(ret)
-        return select_action_queued(game)
-
-    return select_action
+    return select_action_cluster
 
 
 if __name__ == '__main__':

@@ -52,7 +52,7 @@ def action2tensor(mino, a):
     )
 
 
-def state_action2tensor(g: rust_tetris.BaseGame, a):
+def state_action2tensor(g: rust_tetris.Game, a):
     b = game.game2bool_field(g)
     queue_action = [board.piece2tensor(p) for p in g.queue[:board.N_QUEUE]] + \
                    [action2tensor(g.piece.type.name, a)]
@@ -60,14 +60,14 @@ def state_action2tensor(g: rust_tetris.BaseGame, a):
     return vec
 
 
-def state2tensor(g: rust_tetris.BaseGame):
+def state2tensor(g: rust_tetris.Game):
     b = game.game2bool_field(g)
     queue = [board.piece2tensor(p) for p in g.queue[:board.N_QUEUE]]
     vec = torch.concat((b, *queue)).type(torch.float32)
     return vec
 
 
-def get_next_game(g: rust_tetris.BaseGame, a: Tuple[int, int]):
+def get_next_game(g: rust_tetris.Game, a: Tuple[int, int]):
     _g = g.copy()
     r, t = a
     for _ in range(r):
@@ -88,7 +88,7 @@ def get_random_action_ratio(v_initial, v_final, n_current, n_final):
 
 # constants
 #     progress tracking
-ROOT = pathlib.Path(f"runs/{board.N_QUEUE}_comp_act")
+ROOT = pathlib.Path(f"runs/mcts_{board.N_QUEUE}")
 ROOT.mkdir(exist_ok=True)
 #     schedule
 REPLAY_QUEUE_SIZE = 300_000
@@ -119,9 +119,24 @@ def main():
     q_func = get_q_function(ROOT)
     q_func.train()
     optim = get_optimizer(ROOT, q_func.parameters(), LR)
-    import code
-    code.interact(local={**globals(), **locals()})
-    state = board.get_random_state(EMPTY_HEIGHT, my_engine, None)
+
+    def get_sars_iterator():
+        episodes = [
+            json.loads(p.read_text())
+            for p in pathlib.Path("logs").rglob("log_*.json")
+        ]
+        for e in episodes:
+            is_over = [False for _ in e['actions']]
+            is_over[-1] = e['over']
+            for s, a, s_, over in zip(e['states'], e['actions'], e['states'][1:], is_over):
+                s, score = s[:-1], s[-1]
+                s_, score_ = s_[:-1], s_[-1]
+                assert 220 + 8 + 1 <= len(s) <= 220 + 13 + 1
+                assert 220 + 8 + 1 <= len(s_) <= 220 + 13 + 1
+                yield s[:220 + board.N_QUEUE], a, score_ - score, s_[:220 + board.N_QUEUE], over
+
+    iter_sars = get_sars_iterator()
+
     match METHOD:
         case 'SARSA':
             replay_queue = utils.DequeSARSA(REPLAY_QUEUE_SIZE, state_action2tensor)  # SARSA
@@ -142,33 +157,14 @@ def main():
     loss_acc = utils.Accumulator()
     reward_acc = utils.Accumulator()
 
-    i_episode = 0
     i_step = 1
     if (p := ROOT / "progress.txt").exists():
         progress = json.loads(p.open('r').read())
-        i_step, i_episode = progress['i_step'], progress['i_episode']
+        i_step = progress['i_step']
 
     for i_step in range(i_step, N_STEP):
         # policy
-        actions = MINO2ACTIONS[state.piece.type.name]
-        random_action_ratio = get_random_action_ratio(RANDOM_ACTION_INITIAL_VALUE,
-                                                      RANDOM_ACTION_FINAL_VALUE,
-                                                      i_episode,
-                                                      RANDOM_ACTION_FINAL_STEP)
-        if replay_queue.size() < REPLAY_QUEUE_SIZE / 10 or random.random() <= random_action_ratio:
-            action = random.choice(actions)
-        else:
-            q_func.eval()
-            with torch.no_grad():
-                i_a = torch.argmax(
-                    q_func(torch.stack([
-                        state_action2tensor(state, a)
-                        for a in actions
-                    ])).reshape(-1)
-                )
-                action = actions[i_a]
-            q_func.train()
-        reward, state_, over = get_next_game(state, action, my_engine)
+        (state, action, reward, state_, over) = next(iter_sars)
         replay_queue.push((state, action, reward, state_, over))
         reward_acc.add(reward)
         state = state_
@@ -176,13 +172,6 @@ def main():
         # policy done
 
         # schedule
-        if over or loss_acc.n > 10_000:  # force terminate if tick more than 10k
-            i_episode += 1
-            report(LOGGER, state, reward_acc, loss_acc, random_action_ratio, replay_queue, i_episode)
-            loss_acc.clear()
-            reward_acc.clear()
-            state = board.get_random_state(EMPTY_HEIGHT, my_engine, None)
-
         if replay_queue.size() < REPLAY_QUEUE_SIZE / 10:
             continue
         # schedule done
@@ -196,6 +185,9 @@ def main():
 
         # logging
         if i_step % 1000 == 0:
+            report(LOGGER, state, reward_acc, loss_acc, 0., replay_queue, i_episode)
+            loss_acc.clear()
+            reward_acc.clear()
             print("Score Samples", np.array([x[0] for x in replay_queue.ipq.heap[:1000]]))
             print("(UCB) Arm visit Samples", np.array(replay_queue.ucb.i2n_raw[:1000]))
             print("Saving checkpoints ...")
@@ -204,7 +196,6 @@ def main():
             with (ROOT / "progress.txt").open('w') as fp:
                 fp.write(json.dumps({
                     "i_step": i_step,
-                    "i_episode": i_episode,
                 }))
         # logging done
 
@@ -268,21 +259,21 @@ def learn(method, samples, q_func, optim, discount):
 
 
 def report(logger: torch.utils.tensorboard.SummaryWriter,
-           g: rust_tetris.BaseGame,
+           g: rust_tetris.Game,
            r: utils.Accumulator,  # reward
            l: utils.Accumulator,  # loss
            rar: float,            # random action ratio
            q,
            i: int,                # episode index
 ) -> None:
-    logger.add_scalar('Episode/NumberOfLineClear',     g.scorer.line_clears, i)
-    logger.add_scalar('Episode/LossAverage',           l.average,            i)
-    logger.add_scalar('Episode/LossMax',               l.max,                i)
-    logger.add_scalar('Episode/LossMin',               l.min,                i)
-    logger.add_scalar('Episode/NumberOfTicks',         r.n,                  i)
-    logger.add_scalar('Episode/RewardAverage',         r.average,            i)
-    logger.add_scalar('Episode/RewardTotal',           r.sum,                i)
-    logger.add_scalar('Episode/RandomActionRatio',     rar,                  i)
+    logger.add_scalar('Episode/NumberOfLineClear',     g.line_clears, i)
+    logger.add_scalar('Episode/LossAverage',           l.average,     i)
+    logger.add_scalar('Episode/LossMax',               l.max,         i)
+    logger.add_scalar('Episode/LossMin',               l.min,         i)
+    logger.add_scalar('Episode/NumberOfTicks',         r.n,           i)
+    logger.add_scalar('Episode/RewardAverage',         r.average,     i)
+    logger.add_scalar('Episode/RewardTotal',           r.sum,         i)
+    logger.add_scalar('Episode/RandomActionRatio',     rar,           i)
     logger.add_scalar('Episode/NumberOfTicks',  board.number_of_blocks_dropped(g), i)
 
     # histogram report
