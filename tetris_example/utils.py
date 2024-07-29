@@ -6,6 +6,16 @@ from typing import Dict, Generic, List, TypeVar
 import numpy as np
 
 
+def argmax_many(l, k):
+    idxs = np.argpartition(l, -k)[-k:]
+    return idxs
+
+
+def argmin_many(l, k):
+    idxs = np.argpartition(l, k - 1)[:k]
+    return idxs
+
+
 class DequeSARSA:
     def __init__(self, maxlen: int, sa2t) -> None:
         self.sar = None
@@ -219,10 +229,8 @@ class PrioritizedSAR:
         self.rng = np.random.default_rng(seed=seed)
 
     def push(self, sarsd):
-        s, a, r, s_, d = sarsd
-        p = s.piece.type.name
-        t_, r_, s, done = self.sa2t(s, a), r, self.s2t(s_), d
-        item = [p, t_, r_, s, done, self.last_pushed]
+        sp, a, r, sp_, d = sarsd
+        item = [sp, a, r, sp_, d, self.last_pushed]
         x = self.ipq.push(1e5, item)
 
         self.last_pushed = None if d else x
@@ -276,23 +284,23 @@ class PrioritizedSAR:
         # d-ucb sampling done
 
         # uniform sampling
-        # idxs_pq = random.sample(range(len(self.ipq.heap)), batch_size)
-        # def update(priorities):
-        #     for i_pq, v in zip(idxs_pq, priorities):
-        #         self.ipq.heap[i_pq][0] = v
-        #     self.ipq.update()
+        idxs_pq = random.sample(range(len(self.ipq.heap)), batch_size)
+        def update(priorities):
+            for i_pq, v in zip(idxs_pq, priorities):
+                self.ipq.heap[i_pq][0] = v
+            self.ipq.update()
         # uniform sampling done
 
         # simple weighted sampling
-        weights = np.asarray([x ** .5 for x, *_ in self.ipq.heap])
-        weights /= weights.sum()
-        weights[weights <= 0] = 1e-7
-        idxs_pq = weighted_sample_without_replacement(range(self.ipq.size()), weights, batch_size)
-        def update(priorities):
-            # heapify again
-            for i_pq, v in zip(idxs_pq, priorities):
-                self.ipq.heap[i_pq][0] = v ** self.per_power
-            self.ipq.update()
+        # weights = np.asarray([x ** .5 for x, *_ in self.ipq.heap])
+        # weights /= weights.sum()
+        # weights[weights <= 0] = 1e-7
+        # idxs_pq = weighted_sample_without_replacement(range(self.ipq.size()), weights, batch_size)
+        # def update(priorities):
+        #     # heapify again
+        #     for i_pq, v in zip(idxs_pq, priorities):
+        #         self.ipq.heap[i_pq][0] = v ** self.per_power
+        #     self.ipq.update()
         # simple weighted sampling done
 
         # backward propatating weighted sampling

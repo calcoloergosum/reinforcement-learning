@@ -9,17 +9,16 @@ import torch
 import torch.utils
 import torch.utils.tensorboard
 import torchvision
+import tqdm
 
-from . import board, utils
+from . import board, game, utils
 from .action_cluster import ACTION_SIZE, MINO2ACTION2INDEX, MINO2ACTIONS
-from .gravity import ManualGravity
 
-from . import game
 
 def get_q_function(root: pathlib.Path) -> torch.nn.Module:
     # net = TetrisNet()
     net = torchvision.ops.MLP(
-        board.BOARD_WIDTH * (board.BOARD_HEIGHT + board.BOARD_HEIGHT_ROI - 1) +
+        board.BOARD_WIDTH * (board.BOARD_HEIGHT + board.BOARD_HEIGHT_ROI) +
         board.N_QUEUE * 7 + ACTION_SIZE,
         [1024, 1024, 64, 1],
         # [1024, 1024, 256, 256, 32, 1],
@@ -91,17 +90,15 @@ def get_random_action_ratio(v_initial, v_final, n_current, n_final):
 ROOT = pathlib.Path(f"runs/mcts_{board.N_QUEUE}")
 ROOT.mkdir(exist_ok=True)
 #     schedule
-REPLAY_QUEUE_SIZE = 300_000
+REPLAY_QUEUE_SIZE = 30_000
+REPLAY_QUEUE_SIZE_MIN = 3_000
 LR = 0.01
 N_STEP = 1_000_000
 BATCH_SIZE = 512
 #     environment, agent
 EMPTY_HEIGHT = board.BOARD_HEIGHT // 2
 METHOD = 'Q-learning-PER'
-DISCOUNT = 0.95
-RANDOM_ACTION_INITIAL_VALUE = 5e-2
-RANDOM_ACTION_FINAL_VALUE   = 5e-2
-RANDOM_ACTION_FINAL_STEP    = 2_000
+DISCOUNT = 0.8
 #     logging
 LOGGER = torch.utils.tensorboard.SummaryWriter(ROOT)
 np.set_printoptions(precision=3, threshold=1e5, suppress=True)
@@ -121,19 +118,29 @@ def main():
     optim = get_optimizer(ROOT, q_func.parameters(), LR)
 
     def get_sars_iterator():
-        episodes = [
-            json.loads(p.read_text())
-            for p in pathlib.Path("logs").rglob("log_*.json")
-        ]
-        for e in episodes:
+        paths = list(pathlib.Path("logs").rglob("log_*.json"))
+        random.shuffle(paths)
+        for path in paths:
+            e = json.loads(path.read_text())
             is_over = [False for _ in e['actions']]
             is_over[-1] = e['over']
-            for s, a, s_, over in zip(e['states'], e['actions'], e['states'][1:], is_over):
-                s, score = s[:-1], s[-1]
-                s_, score_ = s_[:-1], s_[-1]
-                assert 220 + 8 + 1 <= len(s) <= 220 + 13 + 1
-                assert 220 + 8 + 1 <= len(s_) <= 220 + 13 + 1
-                yield s[:220 + board.N_QUEUE], a, score_ - score, s_[:220 + board.N_QUEUE], over
+            for i, (s, a, s_, over) in enumerate(zip(e['states'], e['actions'], e['states'][1:], is_over)):
+                s,  p,  score  = s [:-1], *s[-2:]
+                s_, p_, score_ = s_[:-1], *s_[-2:]
+                assert 220 + 8 + 1 <= len(s)  <= 220 + 14 + 1, f"{len(s) } {p}"
+                assert 220 + 8 + 1 <= len(s_) <= 220 + 14 + 1, f"{len(s_)} {p_}"
+
+                q = [0 for _ in range(board.N_QUEUE * 7)]
+                for i, p in enumerate(s[220:220+board.N_QUEUE]):
+                    q[7*i + p - 1] = 1
+                    
+                q_ = [0 for _ in range(board.N_QUEUE * 7)]
+                for i, p in enumerate(s[220:220+board.N_QUEUE]):
+                    q_[7*i + p - 1] = 1
+
+                assert score_ - score >= 0, f"{path}, {i}"
+                yield (s[:220] + q, p), a, score_ - score, (s_[:220] + q_, p_), over
+            assert over
 
     iter_sars = get_sars_iterator()
 
@@ -162,17 +169,28 @@ def main():
         progress = json.loads(p.open('r').read())
         i_step = progress['i_step']
 
+    progress_bar = tqdm.tqdm(total=1000)
     for i_step in range(i_step, N_STEP):
+        progress_bar.update()
         # policy
-        (state, action, reward, state_, over) = next(iter_sars)
+        try:
+            (state, action, reward, state_, over) = next(iter_sars)
+        except StopIteration:
+            iter_sars = get_sars_iterator()
+            (state, action, reward, state_, over) = next(iter_sars)
+
         replay_queue.push((state, action, reward, state_, over))
         reward_acc.add(reward)
+        if over:
+            report(LOGGER, state, reward_acc, loss_acc, 0., replay_queue, i_step)
+            loss_acc.clear()
+            reward_acc.clear()
         state = state_
-        del action, reward, state_, actions
+        del action, reward, state_
         # policy done
 
         # schedule
-        if replay_queue.size() < REPLAY_QUEUE_SIZE / 10:
+        if replay_queue.size() < REPLAY_QUEUE_SIZE_MIN:
             continue
         # schedule done
 
@@ -185,9 +203,6 @@ def main():
 
         # logging
         if i_step % 1000 == 0:
-            report(LOGGER, state, reward_acc, loss_acc, 0., replay_queue, i_episode)
-            loss_acc.clear()
-            reward_acc.clear()
             print("Score Samples", np.array([x[0] for x in replay_queue.ipq.heap[:1000]]))
             print("(UCB) Arm visit Samples", np.array(replay_queue.ucb.i2n_raw[:1000]))
             print("Saving checkpoints ...")
@@ -197,6 +212,8 @@ def main():
                 fp.write(json.dumps({
                     "i_step": i_step,
                 }))
+            progress_bar.close()
+            progress_bar = tqdm.tqdm(total=1000)
         # logging done
 
 
@@ -211,20 +228,27 @@ def learn(method, samples, q_func, optim, discount):
                 targets[active_idxs] += discount * q_func(torch.stack([sa_aft[i] for i in active_idxs]))[:, 0]
             q_func.train()
         case 'Q-learning' | 'Q-learning-PER':
-            pieces, sa_bef, r, s_aft, done = zip(*samples)
+            sp_bef, pa, r, sp_aft, done = zip(*samples)
+            s_bef, _ = zip(*sp_bef)
+            pieces, a = zip(*pa)
+            s_aft, _ = zip(*sp_aft)
+            
+            targets = torch.tensor(r, dtype=torch.float32)
+            s_bef = torch.tensor(s_bef, dtype=torch.float32)
+            s_aft = torch.tensor(s_aft, dtype=torch.float32)
+            a = torch.nn.functional.one_hot(torch.tensor(a), ACTION_SIZE)
+            sa_bef = torch.concat((s_bef, a), axis=1)
+
             q_func.eval()
             with torch.no_grad():
-                targets = torch.tensor(r)
-
                 done = torch.tensor(done)
-                size_sa = len(sa_bef[0])
+                size_sa = len(s_bef[0]) + ACTION_SIZE
 
-                s_aft = torch.stack(s_aft)
                 vs = torch.inf * torch.ones(sum(~done))
 
                 pieces_np = np.array(pieces)[~done]
                 for mino, actions in MINO2ACTIONS.items():
-                    _idxs = torch.from_numpy(pieces_np == mino)
+                    _idxs = torch.from_numpy(pieces_np == rust_tetris.piece_kind_str2int(mino))
                     n_mino = _idxs.sum()
                     if n_mino == 0:
                         continue
@@ -233,22 +257,27 @@ def learn(method, samples, q_func, optim, discount):
                     sa_aft[:, :, :-ACTION_SIZE] = s_aft[~done, None, :][_idxs]
                     sa_aft[:, :, -ACTION_SIZE:] = torch.nn.functional.one_hot(
                         torch.arange(action_size), ACTION_SIZE)[None, :, :]
-                    vs[_idxs] = torch.max(
-                        q_func(
-                            sa_aft
-                            .reshape(-1, size_sa)
-                        )
-                        .reshape(n_mino, action_size),
-                        dim=1,
-                    ).values
-                assert (vs != torch.inf).all()
+                    
+                    # Pure q-learning
+                    vs[_idxs] = qs.max(dim=1).values
+                    
+                    # Epsilon greedy learning
+                    EPSILON = 0.05
+                    qs = q_func(
+                        sa_aft
+                        .reshape(-1, size_sa)
+                    ).reshape(n_mino, action_size)
+                    vs[_idxs] = (1 - EPSILON) * qs.max(dim=1).values + EPSILON * qs.mean(dim=1)
+                    # Epsilon greedy learning done
+
+                assert (vs != torch.inf).all(), "Model seems corrupt"
                 targets[~done] += discount * vs
-            assert (targets != torch.inf).all()
+            assert (targets != torch.inf).all(), "Missing assignment?"
             q_func.train()
 
     optim.zero_grad()
     loss = torch.nn.functional.smooth_l1_loss(
-        q_func(torch.stack(sa_bef)).flatten(),
+        q_func(sa_bef).flatten(),
         targets, reduction='none'
     )
     loss_mean = loss.mean()
@@ -266,7 +295,8 @@ def report(logger: torch.utils.tensorboard.SummaryWriter,
            q,
            i: int,                # episode index
 ) -> None:
-    logger.add_scalar('Episode/NumberOfLineClear',     g.line_clears, i)
+    # logger.add_scalar('Episode/NumberOfLineClear',     g.line_clears, i)
+    # logger.add_scalar('Episode/NumberOfTicks',  board.number_of_blocks_dropped(g), i)
     logger.add_scalar('Episode/LossAverage',           l.average,     i)
     logger.add_scalar('Episode/LossMax',               l.max,         i)
     logger.add_scalar('Episode/LossMin',               l.min,         i)
@@ -274,7 +304,6 @@ def report(logger: torch.utils.tensorboard.SummaryWriter,
     logger.add_scalar('Episode/RewardAverage',         r.average,     i)
     logger.add_scalar('Episode/RewardTotal',           r.sum,         i)
     logger.add_scalar('Episode/RandomActionRatio',     rar,           i)
-    logger.add_scalar('Episode/NumberOfTicks',  board.number_of_blocks_dropped(g), i)
 
     # histogram report
     priorities = np.array([x for x, *_ in q.ipq.heap if x < 1e4])

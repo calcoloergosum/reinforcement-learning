@@ -1,16 +1,15 @@
 import itertools
+import random
 import resource
-from typing import Callable, List, Tuple, Literal
+from multiprocessing.pool import ThreadPool
+from typing import Callable, List, Literal, Tuple
 
 import humanfriendly
 import numpy as np
 import rust_tetris
 
-from . import board
-from .action_cluster import MINO2ACTIONS
+from . import board, heuristic
 from .uct_base import UCTNode
-import random
-
 
 State = Tuple[bool, rust_tetris.Game]
 
@@ -18,11 +17,6 @@ State = Tuple[bool, rust_tetris.Game]
 # MODE = 'random'
 MODE = 'greedy'
 
-
-def game2actions(game: rust_tetris.Game) -> List[Tuple[int, int]]:
-    i_kind, *_ = game.piece
-    str_kind = rust_tetris.piece_kind_int2str(i_kind)
-    return MINO2ACTIONS[str_kind]
 
 
 def play(state: State, action: int) -> State:
@@ -43,7 +37,7 @@ def play(state: State, action: int) -> State:
         else:
             raise KeyError(f"Unknown mode {MODE}")
 
-    r, t = game2actions(game)[action]
+    r, t = heuristic.game2actions(game)[action]
     for _ in range(r):
         game.rotate_c()
     for _ in range(0, t):
@@ -61,7 +55,7 @@ def turn(state: State) -> Literal[-1] | 0 | 1:
 def report_statistics(root: UCTNode,
                       game2score: Callable[[rust_tetris.Game], float] | None = None,
 ) -> None:
-    game2score = game2score or game2score_vanilla
+    game2score = game2score or heuristic.game2score_vanilla
 
     x = root
     for i in itertools.count():
@@ -89,13 +83,10 @@ def main() -> None:
     report_statistics(root)
 
 
-def game2score_vanilla(state: rust_tetris.Game) -> float:
-    return state.score
-
-
 def get_policy(n_search: int,
                ucb_constant: float,
                epsilon: float,
+               n_thread: int,
                game2score: Callable[[rust_tetris.Game], float] | None = None,
 ):
     """ε-greedy UCT search.
@@ -108,11 +99,11 @@ def get_policy(n_search: int,
     Technically speaking, a value σ that the reward becomes sub-σ gaussian is optimal.
     Practically, the algorithm is not too sensitive to this value - just increase `n_search`!
     """
-    game2score = game2score or game2score_vanilla
+    game2score = game2score or heuristic.game2score_vanilla
 
     def evaluate_uniform(state):
         ready_to_drop, game = state
-        actions = game2actions(game)
+        actions = heuristic.game2actions(game)
         score = game2score(game) / ucb_constant
 
         if ready_to_drop:  # next player is random player
@@ -153,6 +144,7 @@ def get_policy(n_search: int,
 
     evaluate = evaluate_uniform
     root = None
+    thread_pool = ThreadPool(16) if n_thread else None
 
     def select_action_cluster(game: rust_tetris.Game) -> Tuple[int, List[str]]:
         nonlocal root
@@ -194,17 +186,17 @@ def get_policy(n_search: int,
                     _ = board.get_render_func(root.inner[1])()()
                     raise RuntimeError("Random action is not working correctly")
 
-        actions = game2actions(game)
+        actions = heuristic.game2actions(game)
 
         if epsilon > random.random():
             # Random action
             i_action, _ = random.choice(list(enumerate(actions)))
-            root, _ = UCTNode.uct_search((False, game), 1, evaluate, play, turn)
+            root, _ = UCTNode.uct_search((False, game), 1, evaluate, play, turn, thread_pool)
         else:
             if root is None:
-                root, i_action = UCTNode.uct_search((False, game), n_search, evaluate, play, turn)
+                root, i_action = UCTNode.uct_search((False, game), n_search, evaluate, play, turn, thread_pool)
             else:
-                root, i_action = UCTNode.uct_search_continue(root, n_search - root.number_visits, evaluate, play, turn)
+                root, i_action = UCTNode.uct_search_continue_parallel(root, n_search - root.number_visits, evaluate, play, turn, thread_pool)
         report_statistics(root, game2score)
 
         # Cache tree for later use
@@ -219,16 +211,7 @@ def get_policy(n_search: int,
         root.parent = dummy
         root.move = None
 
-        r, t = actions[i_action]
-        ret = []
-        if r != 0:
-            ret.extend(('rotate',) * r)
-
-        if t > 0:
-            ret.extend(('right',) * t)
-        else:
-            ret.extend(('left',) * (-t))
-        ret.append('hard_drop')
+        ret = heuristic.action2commands(*actions[i_action])
 
         # Report
         n_bytes = humanfriendly.format_size(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)

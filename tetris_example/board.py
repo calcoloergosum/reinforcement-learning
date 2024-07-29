@@ -120,10 +120,6 @@ def get_render_func(game: rust_tetris.Game):
 Action = Literal["left", "right", "wait", "rotate"]
 
 
-def number_of_blocks_dropped(g: tetris.BaseGame) -> float:
-    return (sum(np.array(g.board.data) > 0) + BOARD_WIDTH * g.scorer.line_clears) / 4
-
-
 def immediate_reward(g_bef: tetris.BaseGame, g_aft: tetris.BaseGame) -> float:
     reward = 0.
 

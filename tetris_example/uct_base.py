@@ -1,11 +1,13 @@
 """Basic monte carlo tree search"""
 
 import collections
-from typing import Callable, Generic, Literal, Tuple, TypeVar
+from typing import Callable, Generic, List, Literal, Tuple, TypeVar
 
 import numpy as np
 import tqdm
 from typing_extensions import Self
+
+from . import utils
 
 T = TypeVar("T")
 A = TypeVar("A")
@@ -59,11 +61,24 @@ class UCTNode(Generic[T, A]):
             return np.argmin(self.child_Q() + self.child_U())
         if self.turn == 0:
             return np.argmin(self.child_number_visits)
-            # n_children = len(self.child_total_value)
-            # if len(self.children) < n_children:
-            #     zeros = np.nonzero(self.child_number_visits == 0)[0]
-            #     return zeros[np.random.randint(0, len(zeros))]
-            # return np.random.randint(0, n_children)
+        raise NotImplementedError("Should be unreachable")
+
+    def best_children(self, at_most: int) -> List[int]:
+        """Returns at most `k` best children, sorted"""
+        k = min(at_most, len(self.child_number_visits))
+        if self.turn == 1:
+            vals = self.child_Q() + self.child_U()
+            idxs = utils.argmax_many(vals, k)
+            return idxs[np.argsort(vals[idxs])][::-1]
+        if self.turn == -1:
+            vals = self.child_Q() + self.child_U()
+            idxs = utils.argmin_many(vals, k)
+            return idxs[np.argsort(vals[idxs])]
+        if self.turn == 0:
+            vals = self.child_number_visits
+            idxs = utils.argmin_many(vals, k)
+            np.random.shuffle(idxs)
+            return idxs
         raise NotImplementedError("Should be unreachable")
 
     def select_leaf(self, play: Callable[[T, A], T],
@@ -71,8 +86,25 @@ class UCTNode(Generic[T, A]):
         current = self
         while current.is_expanded:
             best_move = current.best_child()
-            current = current.maybe_add_child(best_move, play, turn)
+            _, current = current.maybe_add_child(best_move, play, turn)
         return current
+
+    def select_leaves(self, play: Callable[[T, A], T],
+                      turn: Callable[[T], Literal[-1] | 0 | 1], n: int) -> List[Self]:
+        if not self.is_expanded:
+            return [self]
+
+        ret = []
+        best_moves = self.best_children(n)
+        for m in best_moves:
+            is_added, next = self.maybe_add_child(m, play, turn)
+            if is_added:
+                ret += [next]
+            else:
+                xs = list(next.select_leaves(play, turn, n))
+                n -= len(xs)
+                ret += xs
+        return ret
 
     def expand(self, child_priors: np.ndarray) -> None:
         assert not self.is_expanded
@@ -82,11 +114,13 @@ class UCTNode(Generic[T, A]):
         self.child_number_visits = np.zeros(len(child_priors), dtype=np.uint16)
 
     def maybe_add_child(self, move: A, play: Callable[[T, A], T],
-                        turn: Callable[[T], Literal[-1] | 0 | 1]) -> Self:
+                        turn: Callable[[T], Literal[-1] | 0 | 1]) -> Tuple[bool, Self]:
+        is_added = False
         if move not in self.children:
             next_state = play(self.inner, move)
             self.children[move] = UCTNode(next_state, move, parent=self, turn=turn(next_state))
-        return self.children[move]
+            is_added = True
+        return is_added, self.children[move]
 
     def backup(self, value_estimate: float) -> None:
         current = self
@@ -112,8 +146,11 @@ class UCTNode(Generic[T, A]):
                    evaluate: Callable[[T], float],
                    play: Callable[[T, A], T],
                    turn: Callable[[T], Literal[-1] | 0 | 1],
+                   thread_pool,
     ) -> Tuple[Self, int]:
         root = cls(game_state, move=None, turn=turn(game_state), parent=cls.DummyNode())
+        if thread_pool:
+            return cls.uct_search_continue_parallel(root, num_reads, evaluate, play, turn, thread_pool)
         return cls.uct_search_continue(root, num_reads, evaluate, play, turn)
 
     @classmethod
@@ -127,6 +164,37 @@ class UCTNode(Generic[T, A]):
         for _ in tqdm.tqdm(range(num_reads)):
             leaf = root.select_leaf(play, turn)
             leaf.maybe_expand_and_backup(evaluate)
+        return root, np.argmax(root.child_number_visits)
+    
+    @classmethod
+    def uct_search_continue_parallel(cls,
+        root: Self,
+        num_reads: int,
+        evaluate: Callable[[T], float],
+        play: Callable[[T, A], T],
+        turn: Callable[[T], Literal[-1] | 0 | 1],
+        thread_pool,
+    ) -> Tuple[Self, int]:
+        if thread_pool is None:
+            for _ in tqdm.tqdm(range(num_reads)):
+                leaf = root.select_leaf(play, turn)
+                leaf.maybe_expand_and_backup(evaluate)
+            return root, np.argmax(root.child_number_visits)
+
+        def expand(node: Self) -> float:
+            child_priors, value_estimate = evaluate(node.inner)
+            node.expand(child_priors)
+            return value_estimate
+
+        pool_size = len(thread_pool._pool)
+        progress = tqdm.tqdm(range(num_reads))
+        while num_reads > 0:
+            leaves = root.select_leaves(play, turn, pool_size)
+            value_estimates = thread_pool.imap(expand, leaves)
+            for leaf, value_estimate in zip(leaves, value_estimates):
+                leaf.backup(value_estimate)
+            progress.update(min(len(leaves), num_reads))
+            num_reads -= len(leaves)
         return root, np.argmax(root.child_number_visits)
 
     def safe_get_child(self, action,
