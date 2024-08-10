@@ -162,14 +162,38 @@ class DiscountedUCB:
         self.i2n_raw[idxs] += 1
 
 
+class SimpleSAR:
+    """
+    Also, replay samples are selected by discounted UCB (D-UCB; Kocsis and Szepesva ́ri 2006)
+    """
+    def __init__(self, maxlen: int, batch_size: int,
+                 seed: int = 0,
+        ) -> None:
+        self.batch_size = batch_size
+        self.last_pushed = None
+        self.rng = np.random.default_rng(seed=seed)
+        self.maxlen = maxlen
+        self.items = deque(maxlen=maxlen)
+
+    def push(self, sarsd):
+        sp, a, r, sp_, d = sarsd
+        item = [sp, a, r, sp_, d]
+        self.items.append(item)
+        return
+
+    def sample(self):
+        batch_size = min(self.size(), self.batch_size)
+        return random.sample(self.items, batch_size), lambda *_: None
+
+    def size(self):
+        return len(self.items)
+
 class PrioritizedSAR:
     """Prioritized Experience Replay (PER) Queue
 
-    alpha: 0.5
-    
     Also, replay samples are selected by discounted UCB (D-UCB; Kocsis and Szepesva ́ri 2006)
     """
-    def __init__(self, maxlen: int, batch_size: int, sa2t, s2t,
+    def __init__(self, maxlen: int, batch_size: int,
                  per_power: float = 0.5,
                  per_discount: float = 0.8,
                  per_propagate_backwards: float = 0.7,
@@ -212,10 +236,6 @@ class PrioritizedSAR:
         self.ipq = IndexedPriorityQueue(maxlen, on_pushpop=on_pushpop)
         self.last_pushed = None
 
-        # Serializers
-        self.sa2t = sa2t
-        self.s2t  = s2t
-
         # Prioritized Experience Replay
         # When PER power is 0, same as uniform sampling
         # When PER power is 1, same as loss-proprtional sampling
@@ -235,9 +255,6 @@ class PrioritizedSAR:
 
         self.last_pushed = None if d else x
         return
-
-    def episode_over(self):
-        pass
 
     def size(self):
         return self.ipq.size()
@@ -284,23 +301,23 @@ class PrioritizedSAR:
         # d-ucb sampling done
 
         # uniform sampling
-        idxs_pq = random.sample(range(len(self.ipq.heap)), batch_size)
-        def update(priorities):
-            for i_pq, v in zip(idxs_pq, priorities):
-                self.ipq.heap[i_pq][0] = v
-            self.ipq.update()
+        # idxs_pq = random.sample(range(len(self.ipq.heap)), batch_size)
+        # def update(priorities):
+        #     for i_pq, v in zip(idxs_pq, priorities):
+        #         self.ipq.heap[i_pq][0] = v
+        #     self.ipq.update()
         # uniform sampling done
 
         # simple weighted sampling
-        # weights = np.asarray([x ** .5 for x, *_ in self.ipq.heap])
-        # weights /= weights.sum()
-        # weights[weights <= 0] = 1e-7
-        # idxs_pq = weighted_sample_without_replacement(range(self.ipq.size()), weights, batch_size)
-        # def update(priorities):
-        #     # heapify again
-        #     for i_pq, v in zip(idxs_pq, priorities):
-        #         self.ipq.heap[i_pq][0] = v ** self.per_power
-        #     self.ipq.update()
+        weights = np.asarray([x for x, *_ in self.ipq.heap])
+        weights /= weights.sum()
+        weights[weights <= 0] = 1e-7
+        idxs_pq = weighted_sample_without_replacement(range(self.ipq.size()), weights, batch_size)
+        def update(priorities):
+            # heapify again
+            for i_pq, v in zip(idxs_pq, priorities):
+                self.ipq.heap[i_pq][0] = v ** self.per_power
+            self.ipq.update()
         # simple weighted sampling done
 
         # backward propatating weighted sampling

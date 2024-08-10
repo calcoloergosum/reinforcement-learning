@@ -16,11 +16,12 @@ settings = {
     "strategy_name": "dellacherie",
     # "strategy_name": 'takado8_small',
     # "strategy_name": 'vanilla',
+    # "strategy_name": 'path_dependency',
     "max_history": 500,
-    "render_every": 20,
+    "render_every": 1,
     "strategy": {
         # Epsilon greedy; Random movement ratio.
-        "epsilon": 0.05,
+        "epsilon": 0.2,
     },
     "board": {
         "type": "sparse-hole",  # ['sparse-hole', 'empty']
@@ -36,6 +37,10 @@ strategies = {
     },
     "dellacherie": {
         "game2score": heuristic.game2score_dellacherie,
+        "score_type": "immediate",
+    },
+    "piece_dependency": {
+        "game2score": heuristic.game2score_piece_dependency,
         "score_type": "immediate",
     },
     "vanilla": {

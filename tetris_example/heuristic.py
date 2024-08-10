@@ -12,6 +12,51 @@ import random
 np.set_printoptions(precision=3, threshold=1e5, suppress=True)
 
 
+def piece_dependency(game: rust_tetris.Game):
+    rows = np.array(game.playfield).reshape(22, 10)
+    rows = game2bool_field(game)
+    heights = column2heights(rows.T)
+    # IJLOSTZ
+
+    same1 = heights[:-1] == heights[1:]
+    same2 = same1[:-1] == same1[1:]
+    same3 = same2[:-1] == same2[1:]
+    up1  = heights[:-1] == heights[1:] - 1
+    down1= heights[:-1] == heights[1:] + 1
+    up2  = heights[:-1] == heights[1:] - 2
+    down2= heights[:-1] == heights[1:] + 2
+
+    n_up1_same = (up1[:-1] & same1[1:]).sum()
+    n_same1_down1 = (same1[:-1] & down1[1:]).sum()
+    n_same1_up1  = (same1[:-1] & up1[1:]).sum()
+    n_same1 = same1.sum()
+    n_down1 = down1.sum()
+    n_down1_same1 = (down1[:-1] & same1[1:]).sum()
+    n_down1_up1 = (down1[1:] & up1[:1]).sum()
+    n_down2 = down2.sum()
+    n_up1 = up1.sum()
+    n_up2 = up2.sum()
+    n_same2 = same2.sum()
+    n_same3 = same3.sum()
+    ns = [
+        # I
+        7 + n_same3,
+        # J
+        n_same2 + n_same1 + n_up2 + n_same1_down1,
+        # L
+        n_same2 + n_same1 + n_down2 + n_up1_same,
+        # O
+        n_same1,
+        # S
+        n_down1 + n_same1_up1,
+        # T
+        n_same2 + n_up1 + n_down1 + n_down1_up1,
+        # Z
+        n_up1 + n_down1_same1,
+    ]
+    return ns
+
+
 def bool_field2feature_heuristic(rows: np.ndarray):
     """Return f3 ~ f8 of Heuristic measures from Boumaza 2009, Table 1
 
@@ -28,7 +73,7 @@ def bool_field2feature_heuristic(rows: np.ndarray):
     """
     rows = rows.astype(np.int8)
     columns = rows.T[:, ::-1]
-    column_heights = [column2height(col) for col in columns]
+    column_heights = column2heights(columns)
 
     # f3: Row transitions
     row_border = np.ones((rows.shape[0], 1), dtype=rows.dtype)
@@ -72,9 +117,8 @@ def bool_field2feature_heuristic(rows: np.ndarray):
     return r_trans, c_trans, n_hole, sum_wells, d_hole, r_hole
 
 
-def column2height(c):
-    is_any_nonzero, h = max(zip(c != 0, itertools.count()))
-    return (h + 1) if is_any_nonzero else 0
+def column2heights(cs):
+    return np.argmax((cs != 0) + np.arange(22)[None, :] * 0.01, axis=1)
 
 
 # from Boumaza 2009, Appendix A
@@ -110,7 +154,7 @@ def game2score_dellacherie(game: rust_tetris.Game) -> float:
 # From github.com/takado8
 def bool_field2feature_takado8(rows):
     columns = rows.T[:, ::-1]
-    column_heights = [column2height(col) for col in columns]
+    column_heights = column2heights(columns)
 
     sum_height = sum(column_heights)
 
@@ -191,3 +235,15 @@ def get_policy(game2score, epsilon):
             _, i_action, action = max(scores)
         return i_action, action2commands(*action)
     return select_action_cluster
+
+
+def game2score_piece_dependency(g: rust_tetris.Game):
+    v_max = -1000
+    for i_a1, _ in enumerate(game2actions(g)):
+        g1 = play(g, i_a1)
+        for i_a2, _ in enumerate(game2actions(g1)):
+            g2 = play(g1, i_a2)
+            v = game2score_dellacherie(g2)
+            if v_max < v:
+                v_max = v
+    return v_max
