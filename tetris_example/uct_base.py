@@ -1,7 +1,7 @@
 """Basic monte carlo tree search"""
 
 import collections
-from typing import Callable, Generic, List, Literal, Tuple, TypeVar
+from typing import Callable, Generic, List, Literal, Tuple, TypeVar, Union, Optional
 
 import numpy as np
 import tqdm
@@ -16,7 +16,7 @@ class UCTNode(Generic[T, A]):
     __slots__ = [ "inner", "move", "is_expanded", "parent", "children",
                  "child_priors", "child_total_value", "child_number_visits", "turn"]
 
-    def __init__(self, inner: T, move: A, turn: Literal[-1] | 0 | 1, parent: Self | None = None):
+    def __init__(self, inner: T, move: A, turn: Union[Literal[-1], Literal[0], Literal[1]], parent: Optional[Self] = None):
         assert move is not None or isinstance(parent, self.DummyNode)
         self.inner = inner
         self.move = move
@@ -82,7 +82,7 @@ class UCTNode(Generic[T, A]):
         raise NotImplementedError("Should be unreachable")
 
     def select_leaf(self, play: Callable[[T, A], T],
-                    turn: Callable[[T], Literal[-1] | 0 | 1],) -> Self:
+                    turn: Callable[[T], Union[Literal[-1], Literal[0], Literal[1]]],) -> Self:
         current = self
         while current.is_expanded:
             best_move = current.best_child()
@@ -90,7 +90,7 @@ class UCTNode(Generic[T, A]):
         return current
 
     def select_leaves(self, play: Callable[[T, A], T],
-                      turn: Callable[[T], Literal[-1] | 0 | 1], n: int) -> List[Self]:
+                      turn: Callable[[T], Union[Literal[-1], Literal[0], Literal[1]]], n: int) -> List[Self]:
         if not self.is_expanded:
             return [self]
 
@@ -114,7 +114,7 @@ class UCTNode(Generic[T, A]):
         self.child_number_visits = np.zeros(len(child_priors), dtype=np.uint16)
 
     def maybe_add_child(self, move: A, play: Callable[[T, A], T],
-                        turn: Callable[[T], Literal[-1] | 0 | 1]) -> Tuple[bool, Self]:
+                        turn: Callable[[T], Union[Literal[-1], Literal[0], Literal[1]]]) -> Tuple[bool, Self]:
         is_added = False
         if move not in self.children:
             next_state = play(self.inner, move)
@@ -145,7 +145,7 @@ class UCTNode(Generic[T, A]):
                    num_reads: int,
                    evaluate: Callable[[T], float],
                    play: Callable[[T, A], T],
-                   turn: Callable[[T], Literal[-1] | 0 | 1],
+                   turn: Callable[[T], Union[Literal[-1], Literal[0], Literal[1]]],
                    thread_pool,
     ) -> Tuple[Self, int]:
         root = cls(game_state, move=None, turn=turn(game_state), parent=cls.DummyNode())
@@ -159,7 +159,7 @@ class UCTNode(Generic[T, A]):
         num_reads: int,
         evaluate: Callable[[T], float],
         play: Callable[[T, A], T],
-        turn: Callable[[T], Literal[-1] | 0 | 1],
+        turn: Callable[[T], Union[Literal[-1], Literal[0], Literal[1]]],
     ) -> Tuple[Self, int]:
         for _ in tqdm.tqdm(range(num_reads)):
             leaf = root.select_leaf(play, turn)
@@ -172,7 +172,7 @@ class UCTNode(Generic[T, A]):
         num_reads: int,
         evaluate: Callable[[T], float],
         play: Callable[[T, A], T],
-        turn: Callable[[T], Literal[-1] | 0 | 1],
+        turn: Callable[[T], Union[Literal[-1], Literal[0], Literal[1]]],
         thread_pool,
     ) -> Tuple[Self, int]:
         if thread_pool is None:
@@ -200,7 +200,7 @@ class UCTNode(Generic[T, A]):
     def safe_get_child(self, action,
         evaluate: Callable[[T], float],
         play: Callable[[T, A], T],
-        turn: Callable[[T], Literal[-1] | 0 | 1],
+        turn: Callable[[T], Union[Literal[-1], Literal[0], Literal[1]]],
     ) -> Self:
         self.maybe_add_child(action, play, turn)
         child = self.children.get(action)

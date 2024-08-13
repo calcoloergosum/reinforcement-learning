@@ -2,7 +2,7 @@ import itertools
 import random
 import resource
 from multiprocessing.pool import ThreadPool
-from typing import Callable, List, Literal, Tuple
+from typing import Callable, List, Literal, Tuple, Union
 
 import humanfriendly
 import numpy as np
@@ -47,7 +47,7 @@ def play(state: State, action: int) -> State:
     return (True, game)
 
 
-def turn(state: State) -> Literal[-1] | 0 | 1:
+def turn(state: State) -> Union[Literal[-1], Literal[0], Literal[1]]:
     ready_to_drop, _ = state
     return 0 if ready_to_drop else 1
 
