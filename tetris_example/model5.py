@@ -19,6 +19,7 @@ def get_q_function(root: pathlib.Path) -> torch.nn.Module:
     in_channels = board.BOARD_WIDTH * (board.BOARD_HEIGHT + board.BOARD_HEIGHT_ROI) +\
         (1 + board.N_QUEUE) * 7
     net = DDQN(in_channels)
+    net.to(device)
     # net = torchvision.ops.MLP(in_channels, [1024, 1024, 32, ACTION_SIZE])
     if (net_path := root / model_filename).exists():
         net.load_state_dict(torch.load(net_path))
@@ -69,6 +70,8 @@ LOGGER = torch.utils.tensorboard.SummaryWriter(ROOT)
 np.set_printoptions(precision=3, threshold=1e5, suppress=True)
 model_filename = "model.pt"
 optim_filename = "optim.pt"
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # constants done
 
 
@@ -199,22 +202,22 @@ def learn(samples, q_func_old, q_func_new, optim, discount):
     sp_bef, pa, r, sp_aft, done = zip(*samples)
     s_bef, p_bef = zip(*sp_bef)
     pieces, a_raw = zip(*pa)
-    a_raw = torch.tensor(a_raw)
+    a_raw = torch.tensor(a_raw).to(device)
     s_aft, p_aft = zip(*sp_aft)
     s_bef = torch.hstack((
         torch.tensor(s_bef, dtype=torch.float32),
         torch.nn.functional.one_hot(torch.tensor(p_bef) - 1, num_classes=7),
-    ))
+    )).to(device)
     s_aft = torch.hstack((
         torch.tensor(s_aft, dtype=torch.float32),
         torch.nn.functional.one_hot(torch.tensor(p_aft) - 1, num_classes=7)
-    ))
-    targets = torch.tensor(r, dtype=torch.float32)  # value of future will be added here
+    )).to(device)
+    targets = torch.tensor(r, dtype=torch.float32).to(device)  # value of future will be added here
 
     with torch.no_grad():
-        done = torch.tensor(done)
+        done = torch.tensor(done).to(device)
 
-        vs = torch.inf * torch.ones(sum(~done))
+        vs = torch.inf * torch.ones(sum(~done)).to(device)
 
         pieces_np = np.array(pieces)[~done]
         for mino, actions in MINO2ACTIONS.items():
@@ -267,7 +270,7 @@ def learn(samples, q_func_old, q_func_new, optim, discount):
 
     # assert q_func_old.feature2advantage[0]._parameters['weight'][0][0] == x, "old q function is updated??"
     assert torch.isfinite(loss_mean)
-    return np.sqrt(loss.detach().numpy()), np.sqrt(float(loss_mean))
+    return np.sqrt(loss.detach().cpu().numpy()), np.sqrt(float(loss_mean.cpu()))
 
 
 def report(logger: torch.utils.tensorboard.SummaryWriter,
