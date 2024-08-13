@@ -128,7 +128,7 @@ def main():
                     g.swap()
                 else:
                     raise KeyError(action)
-                if len(states) % render_every == 0:
+                if render_every and len(states) % render_every == 0:
                     _ = get_render_func(g)()(1)
             states.append(g.copy())
         print(f"[{i_episode:0>4}] Game over after {len(states):0>4} moves " +
