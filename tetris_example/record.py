@@ -1,15 +1,17 @@
+import argparse
+import copy
 import json
 import pathlib
+import random
 import time
 
+import humanfriendly
+import numpy as np
 import rust_tetris
 
-from . import heuristic, uct, game
+from . import game, heuristic, uct
 from .board import get_render_func
 from .board import select_action as manual_policy
-import numpy as np
-import copy
-
 
 settings = {
     "log_dir": pathlib.Path("logs"),
@@ -18,10 +20,10 @@ settings = {
     # "strategy_name": 'vanilla',
     # "strategy_name": 'path_dependency',
     "max_history": 500,
-    "render_every": 1,
+    "render_every": 1000,
     "strategy": {
         # Epsilon greedy; Random movement ratio.
-        "epsilon": 0.2,
+        "epsilon": 0.5,
     },
     "board": {
         "type": "sparse-hole",  # ['sparse-hole', 'empty']
@@ -63,11 +65,17 @@ def get_policy(config):
     else:
         raise NotImplementedError(score_type)
     return policy
-    
+
 
 def main():
     """Play interactively"""
-    for _ in range(100):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-n", type=int, default=100)
+    parser.add_argument("-e", type=float, default=0.01)
+    args = parser.parse_args()
+    settings["strategy"]["epsilon"] = args.e
+
+    for i_episode in range(1, args.n + 1):
         config = copy.deepcopy(settings)
         g = rust_tetris.Game()
 
@@ -97,7 +105,7 @@ def main():
         while not g.is_game_over:
             # print(f"Move #{len(states):0>4} (score: {g.score: >10})")
             if len(states) >= max_history:
-                config["strategy"]["epsilon"] = 0.2
+                config["strategy"]["epsilon"] = 0.3
                 policy = get_policy(config)
 
             i_action, action_cluster = policy(g)
@@ -123,15 +131,17 @@ def main():
                 if len(states) % render_every == 0:
                     _ = get_render_func(g)()(1)
             states.append(g.copy())
-
-        print(f"Game over after {len(states):0>4} moves (score: {g.score: >10}).")
+        print(f"[{i_episode:0>4}] Game over after {len(states):0>4} moves " +
+              f"(lines: {humanfriendly.format_number(g.line_clears): >7} " +
+              f"score: {humanfriendly.format_number(g.score): >10}).")
         logdir = (
             config["log_dir"] /
             config["strategy_name"] /
-            f"eps{config['strategy']['epsilon']}_max{config['max_history']}"
+            f"eps{settings['strategy']['epsilon']}_max{config['max_history']}"
         )
         logdir.mkdir(exist_ok=True, parents=True)
-        (logdir / f"log_{int(time.time())}.json").write_text(
+        salt = hex(int(random.random() * 2 ** 32))[2:]
+        (logdir / f"log_{int(time.time())}_{salt}.json").write_text(
             json.dumps({
                 "actions": actions,
                 "states": [game.game2serialize(state) for state in states],

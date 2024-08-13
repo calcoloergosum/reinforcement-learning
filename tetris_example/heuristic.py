@@ -2,12 +2,13 @@
 Heuristics from Boumaza 2009.
 """
 import itertools
+import random
+from typing import List, Tuple
 
 import numpy as np
-from typing import List, Tuple
 import rust_tetris
+
 from .action_cluster import MINO2ACTIONS
-import random
 
 np.set_printoptions(precision=3, threshold=1e5, suppress=True)
 
